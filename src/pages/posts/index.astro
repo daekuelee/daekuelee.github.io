@@ -1,0 +1,20 @@
+---
+import EntryCard from '@components/EntryCard.astro';
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { getPublishedEntries } from '@lib/content';
+
+const posts = await getPublishedEntries('posts');
+---
+
+<BaseLayout title="Posts" description="Polished technical articles.">
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Posts</p>
+      <h1>공개 기술글</h1>
+      <p>완성도, 검색 가능성, 공유 가능성을 기준으로 정리한 글입니다.</p>
+    </section>
+    <div class="entry-grid">
+      {posts.map((entry) => <EntryCard entry={entry} collection="posts" />)}
+    </div>
+  </div>
+</BaseLayout>

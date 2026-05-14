@@ -1,0 +1,18 @@
+---
+import { SITE_TITLE, sitePath } from '@lib/site';
+
+const navItems = [
+  { href: sitePath('/posts/'), label: 'Posts' },
+  { href: sitePath('/notes/'), label: 'Notes' },
+  { href: sitePath('/projects/'), label: 'Projects' },
+  { href: sitePath('/search/'), label: 'Search' },
+  { href: sitePath('/about/'), label: 'About' },
+];
+---
+
+<header class="site-header">
+  <a class="site-title" href={sitePath('/')}>{SITE_TITLE}</a>
+  <nav aria-label="Primary navigation">
+    {navItems.map((item) => <a href={item.href}>{item.label}</a>)}
+  </nav>
+</header>

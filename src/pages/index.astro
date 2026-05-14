@@ -1,0 +1,68 @@
+---
+import EntryCard from '@components/EntryCard.astro';
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { getAllPublishedEntries, getPublishedEntries } from '@lib/content';
+import { SITE_DESCRIPTION, SITE_TITLE, sitePath } from '@lib/site';
+
+const allEntries = await getAllPublishedEntries();
+const latest = allEntries.slice(0, 6);
+const featuredPosts = (await getPublishedEntries('posts')).filter((entry) => entry.data.featured).slice(0, 3);
+const projects = (await getPublishedEntries('projects')).slice(0, 2);
+---
+
+<BaseLayout title={SITE_TITLE} description={SITE_DESCRIPTION}>
+  <div class="page-shell">
+    <div class="home-grid">
+      <section class="intro">
+        <p class="eyebrow">Technical blog and learning notes</p>
+        <h1>코드, 학습 기록, 프로젝트를 한 repo에서 관리합니다.</h1>
+        <p>
+          긴 플랫폼 의존성보다 글의 소유권, 안정적인 URL, 검색 가능한 기술 기록을 우선하는
+          개발자 블로그입니다.
+        </p>
+      </section>
+
+      <aside class="signal-panel" aria-label="Site signals">
+        <ul>
+          <li>
+            <strong>Posts</strong>
+            <span>완성도 있는 공개 기술글</span>
+          </li>
+          <li>
+            <strong>Notes</strong>
+            <span>학습 중인 주제와 실험 기록</span>
+          </li>
+          <li>
+            <strong>Projects</strong>
+            <span>구현한 시스템과 판단 과정</span>
+          </li>
+        </ul>
+      </aside>
+    </div>
+
+    {featuredPosts.length > 0 && (
+      <section class="section">
+        <h2>Featured</h2>
+        <div class="entry-grid">
+          {featuredPosts.map((entry) => <EntryCard entry={entry} collection="posts" />)}
+        </div>
+      </section>
+    )}
+
+    <section class="section">
+      <h2>Latest</h2>
+      <div class="entry-grid">
+        {latest.map(({ entry, collection }) => <EntryCard entry={entry} collection={collection} />)}
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Projects</h2>
+      <p class="section-lede">글만 쌓는 블로그가 아니라, 만든 것과 그 판단 과정을 함께 남깁니다.</p>
+      <div class="project-grid">
+        {projects.map((entry) => <EntryCard entry={entry} collection="projects" />)}
+      </div>
+      <p><a href={sitePath('/projects/')}>All projects</a></p>
+    </section>
+  </div>
+</BaseLayout>

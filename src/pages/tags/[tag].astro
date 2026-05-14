@@ -1,0 +1,39 @@
+---
+import EntryCard from '@components/EntryCard.astro';
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { getAllPublishedEntries } from '@lib/content';
+import { slugify } from '@lib/site';
+
+export async function getStaticPaths() {
+  const entries = await getAllPublishedEntries();
+  const tags = new Map();
+
+  for (const item of entries) {
+    for (const tag of item.entry.data.tags) {
+      tags.set(slugify(tag), tag);
+    }
+  }
+
+  return [...tags.entries()].map(([slug, tag]) => ({
+    params: { tag: slug },
+    props: {
+      tag,
+      entries: entries.filter((item) => item.entry.data.tags.some((value) => slugify(value) === slug)),
+    },
+  }));
+}
+
+const { tag, entries } = Astro.props;
+---
+
+<BaseLayout title={`Tag: ${tag}`} description={`Entries tagged ${tag}.`}>
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Tag</p>
+      <h1>{tag}</h1>
+    </section>
+    <div class="entry-grid">
+      {entries.map(({ entry, collection }) => <EntryCard entry={entry} collection={collection} />)}
+    </div>
+  </div>
+</BaseLayout>

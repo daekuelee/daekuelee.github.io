@@ -1,0 +1,20 @@
+---
+import EntryCard from '@components/EntryCard.astro';
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { getPublishedEntries } from '@lib/content';
+
+const notes = await getPublishedEntries('notes');
+---
+
+<BaseLayout title="Notes" description="Learning notes and experiments.">
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Notes</p>
+      <h1>학습노트</h1>
+      <p>아직 완성된 글은 아니지만, 나중에 다시 찾아볼 가치가 있는 기록입니다.</p>
+    </section>
+    <div class="entry-grid">
+      {notes.map((entry) => <EntryCard entry={entry} collection="notes" />)}
+    </div>
+  </div>
+</BaseLayout>

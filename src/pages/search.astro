@@ -1,0 +1,32 @@
+---
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { sitePath } from '@lib/site';
+---
+
+<BaseLayout title="Search" description="Search posts, notes, and projects.">
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Search</p>
+      <h1>검색</h1>
+      <p>빌드된 정적 HTML을 Pagefind로 인덱싱합니다.</p>
+    </section>
+    <section class="search-box">
+      <link rel="stylesheet" href={sitePath('/pagefind/pagefind-ui.css')} />
+      <div id="search"></div>
+      <script is:inline define:vars={{ pagefindUi: sitePath('/pagefind/pagefind-ui.js') }}>
+        window.addEventListener('DOMContentLoaded', () => {
+          const script = document.createElement('script');
+          script.src = pagefindUi;
+          script.onload = () => {
+            new window.PagefindUI({
+              element: '#search',
+              showImages: false,
+              showSubResults: true,
+            });
+          };
+          document.head.appendChild(script);
+        });
+      </script>
+    </section>
+  </div>
+</BaseLayout>

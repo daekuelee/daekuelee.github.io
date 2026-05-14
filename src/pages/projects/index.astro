@@ -1,0 +1,20 @@
+---
+import EntryCard from '@components/EntryCard.astro';
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { getPublishedEntries } from '@lib/content';
+
+const projects = await getPublishedEntries('projects');
+---
+
+<BaseLayout title="Projects" description="Project writeups and developer showcase.">
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Projects</p>
+      <h1>프로젝트 쇼케이스</h1>
+      <p>무엇을 만들었는지보다 왜 그렇게 설계했는지를 함께 남깁니다.</p>
+    </section>
+    <div class="project-grid">
+      {projects.map((entry) => <EntryCard entry={entry} collection="projects" />)}
+    </div>
+  </div>
+</BaseLayout>

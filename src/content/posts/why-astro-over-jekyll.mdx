@@ -1,0 +1,22 @@
+---
+title: "Why Astro over Jekyll for this blog"
+description: "A short rationale for choosing Astro, MDX, and content schemas for a developer-facing technical blog."
+pubDate: 2026-05-14
+lang: en
+tags: ["astro", "jekyll", "mdx"]
+draft: false
+featured: true
+series: "blog-system"
+---
+
+## Decision
+
+This site uses Astro instead of Jekyll because the blog is not only a publishing surface. It is also a developer showcase and an AI-readable content repository.
+
+Astro gives this project MDX, content schema validation, static output, and component-level control without requiring a runtime server.
+
+## Tradeoff
+
+Jekyll remains a strong choice for a simple GitHub Pages blog. The cost is that Ruby, Liquid, and weaker content typing do not fit this repo's current direction as well.
+
+Next.js would make full-stack experiments easier, but it is too much machinery for v1.
