@@ -1,0 +1,73 @@
+---
+title: "솔버가 무너진 건 수치가 아니라 시맨틱이었다"
+description: "Bullet 뼈대에 Unreal식 보정을 끼우고 PhysX 모양의 쿼리에 물렸더니 캐릭터가 벽을 탔다. 두 엔진이 서로 다른 질문에 답한다는 걸 인지하기까지 — 그리고 암묵적 혼합을 명시적 설계로 바꾼 기록."
+pubDate: 2026-08-18
+lang: ko
+tags: ["collision", "kcc", "game-engine", "dx12"]
+draft: true
+featured: true
+series: "kcc-rebuild"
+---
+
+## 증상
+
+캡슐 캐릭터가 벽 모서리에 옆으로 걸어 들어가면 위로 튀어 올랐다.
+
+입력은 수평뿐이었다. `WorldState`가 컨트롤러에 넘기는 이동은 `{vx*dt, 0, vz*dt}` — Y 성분이 0이다. 그런데 결과 포즈에는 +Y가 생겼다. 위로 가라고 한 코드가 없는데 위로 갔다면, 그 Y는 컨트롤러 내부 어딘가에서 태어난 것이다.
+
+## 이 시스템은 어떻게 조립되었나
+
+충돌 스택은 세 레퍼런스의 조합이었다.
+
+SceneQuery는 PhysX의 geometry query 구조를 본떠 만들었다. sweep, overlap, 후보 가속, 필터 — 뼈대의 모양이 PhysX였다.
+
+KCC는 Bullet의 `btKinematicCharacterController`를 이식했다. recover → stepUp → stepMove → stepDown 파이프라인, `m_verticalVelocity`와 `m_currentStepOffset` 같은 상태 변수, `recoverAlpha = 0.2` 같은 상수까지. 헤더 첫 줄에 그렇게 적혀 있다: "Architecture reference: Bullet btKinematicCharacterController."
+
+그런데 Bullet의 로직은 쓸수록 어딘가 이상했다. 지면 처리, 계단 정책이 논리적으로 엉성하게 느껴졌고, 그래서 Unreal의 CharacterMovement를 공부해 **보상 로직을 그 위에 끼워 넣었다**. 이 시점의 나는 각 조각의 시맨틱을 정확히 인지하지 못한 채 조합하고 있었다.
+
+## 범인: normal 하나에 네 가지 의미
+
+디버깅 중 잡은 실제 사례. 캡슐 표면점 `(4.8, 3.2, 0)`, 큐브 모서리점 `(5.0, 3.0, 0)`. 이때 쿼리가 돌려주는 normal은 두 점의 차이 방향, `(-0.707, +0.707, 0)`이다.
+
+이 normal은 수학적으로 틀리지 않았다. 최근접점 쌍이 만드는 방향으로서는 정확하다. 문제는 소비하는 쪽이다. 이걸 "벽 응답"으로 쓰면 +Y 성분이 수평 이동에 섞여 들어온다. 위로 튀는 건 여기서 시작된다.
+
+하나의 `Hit.normal`이 네 가지 역할을 겸직하고 있었다.
+
+- 원시 기하 사실 (최근접 방향)
+- 이동 응답 (어느 쪽으로 미끄러질까)
+- 지면 판정 (설 수 있는 면인가)
+- 겹침 복구 (어느 쪽으로 밀어낼까)
+
+그리고 이건 한 엔진의 약점이 아니었다. **PhysX 모양의 쿼리가 뱉는 기하 사실을, Bullet 뼈대 위의 Unreal식 정책 패치가, 정의된 적 없는 필터 경계를 통해 받아 쓰고 있었다.** 세 세계의 시맨틱이 암묵적으로 섞이는 지점마다 이런 겸직이 생겼다.
+
+## 실패한 대응 두 번
+
+첫 번째 대응은 패치였다. 커밋 로그가 그 나흘을 보여준다 — "Fix character controller sweep filtering", "Fix step move/ground flicker", "Stabilize KCC near-zero contacts", "Harden grounded state"… 나흘간 십수 개의 fix/stabilize/harden 커밋. 하나를 잡으면 옆에서 새는 두더지잡기였다.
+
+두 번째는 아예 Unreal 모양으로 다시 세우는 것이었다 — `firstTry: unrealLike kinematic pipeline`. 하루 만에 되돌렸다. 구조를 통째로 갈아끼운다고 시맨틱 문제가 풀리지 않았고, 기존 Recover·필터·쿼리와의 경계는 여전히 정의되어 있지 않았다. 솔버를 `*Legacy` bridge header 뒤로 격리하고 두 달간 손대지 않았다.
+
+## 인지: 두 엔진은 다른 질문에 답한다
+
+돌아와서 처음 한 일은 코드가 아니라 문서였다. 3일간 12편의 감사 문서 — 각 단계가 어떤 시맨틱을 소비하는지 먼저 못 박았다.
+
+그 과정에서 핵심이 보였다. PhysX와 Unreal은 같은 문제를 다르게 푸는 게 아니라, **애초에 다른 질문에 답하고 있었다.** PhysX는 기하의 질문에 답한다 — sweep 거리는 무엇을 의미하는가, 초기 겹침은 무엇을 보고하는가. Unreal은 정책의 질문에 답한다 — 무엇이 바닥인가, 언제 착지가 유효한가. 이 둘을 암묵적으로 섞으면 반드시 어딘가에서 normal이 겸직을 시작한다.
+
+## 해법: 암묵적 혼합을 명시적 설계로
+
+그래서 하나를 골라 베끼는 대신, 혼합 자체를 설계로 만들었다.
+
+- **KCC = Unreal-like 정책층.** `CctMoveMode { Walking, Falling }`이 단일 정책 권위. 바닥·착지 정책은 Unreal 계약을 따른다.
+- **SceneQuery = PhysX-like 기하층.** sweep/overlap 사실, TOI와 초기 겹침 보고는 PhysX 계약을 따른다.
+- **둘 사이의 경계 — 필터와 결과 라우팅 — 는 명시적으로 정의한 혼합층.** 바닥 시맨틱은 타입으로 (`CctFloorSource` / `CctFloorSemantic`), 필터는 단계별로 (`SweepFilter`), 복구는 포즈에만 (속도에 절대 안 섞임), 속도는 sweep 변위에서만 되쓴다.
+
+붕괴의 원인이던 혼합이, 명시적으로 만들자 설계가 되었다.
+
+## 남은 것
+
+이 과정에서 코드보다 오래 남을 것을 얻었다. PhysX와 Unreal이라는 거대 코드베이스 두 개를 소스 레벨에서 분석하는 방법 — core loop을 찾고, phase 경계를 긋고, 정책 계약을 추출하는 법. 그리고 Ericson의 *Real-Time Collision Detection*, Erin Catto의 TOI 자료, CSO/Minkowski 수학이 그 분석의 언어가 되어 주었다.
+
+다음 편에서 그 채굴 기록을 다룬다 — PhysX와 Unreal 소스를 file:line 단위 계약 카드로 만든 방법.
+
+---
+
+감사 문서 원본: [DX12EngineLab — docs/audits/kcc](https://github.com/daekuelee/DX12EngineLab/tree/main/docs/audits/kcc)
