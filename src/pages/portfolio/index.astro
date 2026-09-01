@@ -1,0 +1,35 @@
+---
+import BaseLayout from '@layouts/BaseLayout.astro';
+import { sitePath } from '@lib/site';
+---
+
+<BaseLayout title="Portfolio" description="이대규 포트폴리오 — 트랙별 현재 판과 이전 판.">
+  <div class="page-shell">
+    <section class="intro">
+      <p class="eyebrow">Portfolio</p>
+      <h1>포트폴리오</h1>
+      <p>트랙별로 현재 판 하나를 유지합니다. 이전 판은 피드백 대조용으로만 남겨 둡니다.</p>
+    </section>
+
+    <section class="section">
+      <h2><a href={sitePath('/portfolio/game/')}>Game client / engine — 2026-09</a></h2>
+      <p>
+        C++ / DirectX 12 엔진 개발자 포트폴리오. DX12EngineLab(충돌 시맨틱 · Kinematic Character
+        Controller 디버깅) · webserv(파일 I/O를 이벤트로) · RFS(재귀 렌더를 중간에 멈추기) ·
+        AI second brain · 부록 기본기 ↔ 코드.
+      </p>
+      <p>
+        <a href={sitePath('/portfolio/game/')}>웹으로 보기</a> ·
+        <a href={sitePath('/portfolio/game/LeeDaeGyu_Portfolio.pdf')}>PDF</a>
+      </p>
+    </section>
+
+    <section class="section">
+      <h2>Legacy</h2>
+      <p>
+        <a href={sitePath('/final-portfolio/')}>2026-08 판 (v2)</a> — 이전 게임 클라이언트/엔진 트랙
+        포트폴리오. 피드백용으로만 남겨 둡니다.
+      </p>
+    </section>
+  </div>
+</BaseLayout>
