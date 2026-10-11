@@ -1,0 +1,1084 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log-structured file system</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture series">
+  <span>쇼츠 강의</span><span>›</span><span>Storage: OSTEP 37 → 44 → 43</span>
+  <span class="sp"><a href="2026-10-08-storage-1-hard-disk-rebuilt.html">① Hard disk</a> · <a href="2026-10-08-storage-2-flash-and-ftl.html">② Flash + FTL ★</a> · <a href="2026-10-08-storage-3-garbage-and-write-amplification.html">③ Garbage + WA ★</a> · <a href="2026-10-08-storage-3-5-flash-caches.html">3.5 Flash cache ★</a> · <b style="color:var(--ink)">④ LFS</b> · <a href="https://www.youtube.com/watch?v=5Mh3o886qpg">▶ Video (YouTube)</a></span>
+</nav>
+
+<header>
+  <div class="eyebrow">Short lecture · 2026-10-08 · page ④ of 4 · importance: main (new material) · stands in for OSTEP 43</div>
+  <h1>④ The log-structured file system: write everything sequentially, then find it again</h1>
+  <p class="subtitle">Page ③ ended on the fact that the SSD's log began as a file-system idea. In the early 1990s LFS applied it to a whole file system on a hard disk: gather every update, data and metadata alike, into one large segment and write it in a single sequential transfer. This page follows the design one problem at a time: how much to gather, how to find an inode that moves on every write, where the map of inodes lives, why directories do not trigger a cascade of updates, how old versions are cleaned, and how the system survives a crash.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read · skim = the figure and the CARRY line at the end of the section are enough. Paper tags: <b>papers: needed</b> = the OpenStd papers use it without explaining it · <b>papers: skip</b> = safe to pass on the way to the papers; nothing is cut. On the way to the papers: §1, §2, §7, §9, §11 and §12 are needed, the rest can be skipped. <a href="#s12">§12</a> is where this page meets the papers. Colors on this page: amber = data block, teal = inode, violet = piece of the inode map, red and struck = garbage.</p>
+</header>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>Why did LFS want every write to be sequential?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>The bet itself: buffer small writes and send them as one large sequential write. A log-structured cache is this design with objects in place of file blocks; Flashield, CacheLib's large-object cache and Kangaroo's small log all append in large writes (<a href="2026-10-08-storage-3-5-flash-caches.html#s2">page 3.5 §2</a>). Why they append when flash has no positioning: <a href="#s12">§12.1</a>.</p>
+
+  <div class="figure" id="fig-why">
+    <div class="scroll">
+      <svg viewBox="0 0 760 300" width="760" role="img" aria-label="Top: FFS creating a one-block file makes six small writes to six places, each with its own positioning delay. Bottom: LFS buffers the same updates and writes them as one contiguous run with one positioning delay">
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">FFS creating a one-block file: six small writes to six places in one block group</text>
+        <rect x="16" y="28" width="728" height="50" rx="4" class="surf"/>
+        <rect x="36" y="36" width="64" height="34" class="ln"/><rect x="150" y="36" width="64" height="34" class="accs"/><rect x="268" y="36" width="64" height="34" class="ambs"/>
+        <rect x="392" y="36" width="64" height="34" class="accs"/><rect x="520" y="36" width="64" height="34" class="ambs"/><rect x="650" y="36" width="64" height="34" class="ln"/>
+        <g font-size="10" text-anchor="middle" class="ink">
+          <text x="68" y="50">①</text><text x="182" y="50">②</text><text x="300" y="50">③</text><text x="424" y="50">④</text><text x="552" y="50">⑤</text><text x="682" y="50">⑥</text>
+          <text x="68" y="64">inode bmap</text><text x="182" y="64">inode</text><text x="300" y="64">dir data</text><text x="424" y="64">dir inode</text><text x="552" y="64">data</text><text x="682" y="64">data bmap</text>
+        </g>
+        <text x="16" y="96" font-size="11" class="ink2">each one: a short seek and a rotation (amber) before a tiny transfer (teal)</text>
+        <g>
+          <rect x="16" y="104" width="44" height="18" class="ambs"/><rect x="60" y="104" width="4" height="18" class="accs"/>
+          <rect x="64" y="104" width="44" height="18" class="ambs"/><rect x="108" y="104" width="4" height="18" class="accs"/>
+          <rect x="112" y="104" width="44" height="18" class="ambs"/><rect x="156" y="104" width="4" height="18" class="accs"/>
+          <rect x="160" y="104" width="44" height="18" class="ambs"/><rect x="204" y="104" width="4" height="18" class="accs"/>
+          <rect x="208" y="104" width="44" height="18" class="ambs"/><rect x="252" y="104" width="4" height="18" class="accs"/>
+          <rect x="256" y="104" width="44" height="18" class="ambs"/><rect x="300" y="104" width="4" height="18" class="accs"/>
+        </g>
+        <text x="316" y="118" font-size="11" class="ink2">6 × positioning</text>
+
+        <text x="16" y="164" font-size="12" class="ink" font-weight="600">LFS: the same kind of updates buffered in memory, then one sequential write</text>
+        <rect x="16" y="174" width="728" height="50" rx="4" class="surf"/>
+        <rect x="40" y="182" width="80" height="34" class="ambs"/><rect x="120" y="182" width="80" height="34" class="accs"/><rect x="200" y="182" width="80" height="34" class="ambs"/><rect x="280" y="182" width="80" height="34" class="accs"/><rect x="360" y="182" width="80" height="34" class="vios"/>
+        <g font-size="11" text-anchor="middle" class="ink"><text x="80" y="203">data</text><text x="160" y="203">inode</text><text x="240" y="203">dir data</text><text x="320" y="203">dir inode</text><text x="400" y="203">imap piece</text></g>
+        <text x="460" y="203" font-size="11" class="ink2">one segment, one transfer</text>
+        <rect x="16" y="244" width="44" height="18" class="ambs"/><rect x="60" y="244" width="60" height="18" class="accs"/>
+        <text x="132" y="258" font-size="11" class="ink2">1 × positioning, then the whole segment streams</text>
+        <text x="16" y="290" font-size="11" class="mut">The violet imap piece is the subject of §4.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 1. The problem LFS attacks (OSTEP 43, introduction). Top: FFS keeps the six blocks of a new file in one block group, yet still pays a short seek and a rotation for each. Bottom: LFS writes the updates as one contiguous run, paying the positioning cost once.</p>
+  </div>
+
+  <p>Mendel Rosenblum and John Ousterhout designed LFS at Berkeley around four observations. <b>Memories were growing.</b> As more of the disk's contents could be cached in memory, reads were increasingly served from the cache, so the traffic reaching the disk was mostly writes, and file-system performance came to be decided by write performance. <b>The random–sequential gap was growing.</b> Page ① §2 showed transfer rates rising with bit density while seek and rotation improve slowly. <span class="src">OSTEP 43, introduction</span></p>
+  <p><b>Existing file systems wrote small things to many places.</b> Figure 1, top, shows the Fast File System (FFS) creating a one-block file, which takes six writes: the new inode, the inode bitmap, the directory's data block, the directory's inode, the file's data block, and the data bitmap. FFS keeps all six in one block group, but each is still a short seek plus a rotation, and performance falls far below the disk's sequential bandwidth. <b>File systems ignored RAID.</b> On RAID-4 and RAID-5 a write of a single block costs four physical I/Os, the small-write problem, and file systems did nothing to avoid it. <span class="src">OSTEP 43, introduction</span></p>
+  <p>An ideal file system would therefore turn every write into a large sequential one. That is possible for writes and impossible for reads. A read must go wherever the requested block happens to be, but for a write the file system chooses the location, and LFS exploits exactly that choice. Its plan: buffer all updates in memory, metadata such as inodes included, and once enough have collected, write them to an unused part of the disk in one long sequential transfer. LFS never overwrites anything in place (Figure 1, bottom). <span class="src">OSTEP 43, introduction and crux</span></p>
+  <p>The log-structured FTL of page ② makes the same move for a different reason. The FTL writes somewhere new because flash cannot overwrite; LFS writes somewhere new because a hard disk is fastest when it never has to reposition.</p>
+  <p class="gist"><span class="lbl">CARRY</span>LFS's bet: caches absorb reads, so make writes fast. Buffer every update, data and metadata alike, and write them in one large sequential transfer to free space. Never overwrite in place.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>Is writing in address order enough? Segments and write buffering</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>The segment: a large unit filled in memory and written at once. Kangaroo's log buffers one segment in DRAM before writing it, and FairyWREN makes each segment exactly one erase unit, so dropping a segment frees a whole unit with nothing to copy (Kangaroo §4.2, FairyWREN §5.2). More in <a href="#s12">§12.2</a>.</p>
+
+  <div class="figure" id="fig-segment">
+    <div class="scroll">
+      <svg viewBox="0 0 760 270" width="760" role="img" aria-label="Top: a second small write issued a moment after the first waits almost a full rotation. Bottom: OSTEP's example segment of seven blocks for files j and k, written at once">
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">Sequential addresses are not enough: two small writes, a moment apart</text>
+        <path d="M40 70 H720" class="ln"/>
+        <rect x="60" y="56" width="12" height="14" class="accs"/>
+        <text x="60" y="88" font-size="11" class="ink2">write A at T</text>
+        <rect x="120" y="58" width="480" height="12" class="ambs"/>
+        <text x="120" y="50" font-size="11" class="ink">write A+1 arrives at T + δ</text>
+        <text x="300" y="50" font-size="11" class="amb">waits ≈ T<tspan font-size="8" dy="3">rotation</tspan><tspan dy="-3"> − δ: A+1 has just passed under the head</tspan></text>
+        <rect x="600" y="56" width="12" height="14" class="accs"/>
+        <text x="600" y="88" font-size="11" class="ink2">write A+1</text>
+        <text x="16" y="112" font-size="12" class="ink2">Fix: send one large contiguous write, so the head never waits for the platter to come round again.</text>
+
+        <text x="16" y="146" font-size="12" class="ink" font-weight="600">Write buffering: OSTEP's example segment, seven blocks written at once</text>
+        <g>
+          <rect x="16" y="158" width="92" height="56" class="ambs"/><rect x="114" y="158" width="92" height="56" class="ambs"/><rect x="212" y="158" width="92" height="56" class="ambs"/><rect x="310" y="158" width="92" height="56" class="ambs"/>
+          <rect x="408" y="158" width="92" height="56" class="accs"/><rect x="506" y="158" width="92" height="56" class="ambs"/><rect x="604" y="158" width="92" height="56" class="accs"/>
+        </g>
+        <g font-size="13" class="ink" font-weight="600" text-anchor="middle">
+          <text x="62" y="182">D<tspan font-size="9" dy="3">j,0</tspan></text><text x="160" y="182">D<tspan font-size="9" dy="3">j,1</tspan></text><text x="258" y="182">D<tspan font-size="9" dy="3">j,2</tspan></text><text x="356" y="182">D<tspan font-size="9" dy="3">j,3</tspan></text>
+          <text x="454" y="182">Inode j</text><text x="552" y="182">D<tspan font-size="9" dy="3">k,0</tspan></text><text x="650" y="182">Inode k</text>
+        </g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="454" y="202">b[0..3]: A0–A3</text><text x="650" y="202">b[0]: A5</text></g>
+        <g font-size="10" class="mono mut" text-anchor="middle"><text x="62" y="230">A0</text><text x="160" y="230">A1</text><text x="258" y="230">A2</text><text x="356" y="230">A3</text><text x="454" y="230">A4</text><text x="552" y="230">A5</text><text x="650" y="230">A6</text></g>
+        <path d="M16 238 V246 H696 V238" class="arr"/>
+        <text x="356" y="264" font-size="11" class="ink2" text-anchor="middle">one segment: buffered in memory, then one sequential transfer (real segments are a few MB)</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 2. Top: why order alone fails (OSTEP 43.2). Bottom: OSTEP's segment example. Four new blocks of file j and its inode, plus one new block of file k and its inode, go to disk together; each inode already points at addresses inside the same segment.</p>
+  </div>
+
+  <p>The basic move is simple. When a file gets a new data block D, LFS writes D and also the file's updated inode, which points to D, next to each other in the log. OSTEP draws D at address A0 and, right after it, the inode with its block pointer b[0] = A0. An inode is much smaller than a data block, around 128 bytes against 4 KB. <span class="src">OSTEP 43.1</span></p>
+  <p>Writing in address order is not enough by itself (Figure 2, top). Suppose LFS writes one block at address A at time T, and the next block, A+1, a little later, at T + δ. In between, the platter has turned, so A+1's spot has just passed under the head, and the second write waits for almost a full rotation, T<sub>rotation</sub> − δ. Consecutive addresses pay off only when they reach the disk as one large contiguous write. <span class="src">OSTEP 43.2</span></p>
+  <p>LFS therefore uses <b>write buffering</b>: it keeps updates in memory and writes them out only once it has enough of them. The chunk it writes at once is called a <b>segment</b>, a large-ish run of a few MB. Figure 2, bottom, is OSTEP's small example. Four data blocks of file j with j's inode, and one new block of file k with k's inode, are buffered together and written as a single seven-block segment. Each inode can point at addresses inside the same segment because LFS decides in advance where the segment will go. <span class="src">OSTEP 43.2</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Consecutive addresses are not enough, because the platter keeps turning between small writes. LFS buffers updates in memory and writes one segment, a few MB, at a time.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>How much should LFS buffer before it writes?</h2><span class="tag t-ks">★ core · the formula</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>The formula prices a hard disk's positioning time, which flash does not have. The papers size their writes by the erase unit instead (§2's line above), and the question becomes how many erase units can be open at once (<a href="#s12">§12.2</a>).</p>
+
+  <div class="figure" id="fig-buffer">
+    <div class="scroll">
+      <svg viewBox="0 0 760 300" width="760" role="img" aria-label="Effective write rate as a fraction of peak against the amount buffered per write, on a log scale: half of peak at 1 MB, 90 percent at 9 MB, 95 percent at 19 MB, 99 percent at 99 MB">
+        <g class="ln"><path d="M60 50 V250"/><path d="M60 250 H700"/><path d="M60 50 H700" stroke-dasharray="3 4"/><path d="M60 70 H700" stroke-dasharray="3 4"/><path d="M60 150 H700" stroke-dasharray="3 4"/></g>
+        <g font-size="10" class="mono mut" text-anchor="end"><text x="52" y="254">0</text><text x="52" y="154">0.5</text><text x="52" y="74">0.9</text><text x="52" y="54">1.0</text></g>
+        <g font-size="10" class="mono mut" text-anchor="middle"><text x="60" y="268">0.1 MB</text><text x="273.3" y="268">1 MB</text><text x="486.7" y="268">10 MB</text><text x="700" y="268">100 MB</text></g>
+        <text x="380" y="290" font-size="12" class="ink2" text-anchor="middle">D = data buffered per write (log scale)</text>
+        <text x="16" y="34" font-size="12" class="ink2">R<tspan font-size="9" dy="3">effective</tspan><tspan dy="-3"> ÷ R</tspan><tspan font-size="9" dy="3">peak</tspan><tspan dy="-3">   (T</tspan><tspan font-size="9" dy="3">position</tspan><tspan dy="-3"> = 10 ms, R</tspan><tspan font-size="9" dy="3">peak</tspan><tspan dy="-3"> = 100 MB/s)</tspan></text>
+        <path d="M60 231.8 L124.2 216.7 L209.1 183.3 L273.3 150 L337.5 116.7 L422.5 83.3 L476.9 70 L546.1 60 L635.8 53.9 L699.1 52" style="fill:none;stroke:var(--violet);stroke-width:2.4"/>
+        <circle cx="273.3" cy="150" r="5" class="vios"/><text x="286" y="160" font-size="12" class="vio" font-weight="600">1 MB · 50%</text>
+        <circle cx="476.9" cy="70" r="5" class="vios"/><path d="M476.9 76 V86" class="ln"/><text x="476.9" y="100" font-size="12" class="vio" font-weight="600" text-anchor="middle">9 MB · 90%</text>
+        <circle cx="546.1" cy="60" r="5" class="vios"/><path d="M546.1 66 V112" class="ln"/><text x="546.1" y="126" font-size="12" class="vio" font-weight="600" text-anchor="middle">19 MB · 95%</text>
+        <circle cx="699.1" cy="52" r="5" class="vios"/><path d="M699.1 58 V138" class="ln"/><text x="700" y="152" font-size="12" class="vio" font-weight="600" text-anchor="end">99 MB · 99%</text>
+        <text x="420" y="200" font-size="11" class="ink2">R<tspan font-size="8" dy="3">peak</tspan><tspan dy="-3"> × T</tspan><tspan font-size="8" dy="3">position</tspan><tspan dy="-3"> = 1 MB: what the disk could have</tspan></text>
+        <text x="420" y="216" font-size="11" class="ink2">moved during one positioning delay</text>
+        <text x="420" y="234" font-size="11" class="ink" font-weight="600">D = F/(1−F) × 1 MB</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 3. The effective rate climbs fast at first and then crawls: each halving of the remaining gap to the peak doubles the buffer, the same shape as page ③'s 1/(1−u).</p>
+  </div>
+
+  <div class="claimbox" id="claim-d">
+    <span class="lbl">CLAIM</span>
+    <p><b>Suppose every write pays a fixed positioning cost T<sub>position</sub> and then transfers at the peak rate R<sub>peak</sub>. To reach an effective rate equal to a fraction F of the peak, with 0 &lt; F &lt; 1, each write must carry D = F/(1−F) × R<sub>peak</sub> × T<sub>position</sub>.</b></p>
+  </div>
+  <ol class="steps">
+    <li><div class="st"><b>One write of D takes T<sub>write</sub> = T<sub>position</sub> + D ÷ R<sub>peak</sub>.</b><span>Positioning (seek plus rotation) first, then the transfer of D at the peak rate. <span class="src">OSTEP (43.1)</span></span></div></li>
+    <li><div class="st"><b>The effective rate is R<sub>effective</sub> = D ÷ T<sub>write</sub> = D ÷ (T<sub>position</sub> + D ÷ R<sub>peak</sub>).</b><span>What was written, divided by the time it took. <span class="src">OSTEP (43.2)</span></span></div></li>
+    <li><div class="st"><b>Ask for R<sub>effective</sub> = F × R<sub>peak</sub>.</b><span>So D ÷ (T<sub>position</sub> + D ÷ R<sub>peak</sub>) = F × R<sub>peak</sub>.</span></div></li>
+    <li><div class="st"><b>Multiply both sides by the denominator: D = F × R<sub>peak</sub> × T<sub>position</sub> + F × D.</b><span>The second term is F × R<sub>peak</sub> × (D ÷ R<sub>peak</sub>) = F × D.</span></div></li>
+    <li><div class="st"><b>Collect the D terms: D × (1 − F) = F × R<sub>peak</sub> × T<sub>position</sub>, so D = F/(1−F) × R<sub>peak</sub> × T<sub>position</sub>.</b><span>Dividing by 1 − F is allowed because F &lt; 1. <span class="qed">∎</span></span></div></li>
+    <li><div class="st"><b>OSTEP's example: T<sub>position</sub> = 10 ms, R<sub>peak</sub> = 100 MB/s, F = 0.9 gives D = 9 × 100 MB/s × 0.01 s = 9 MB.</b><span>OSTEP leaves 95% and 99% as questions: F/(1−F) is 19 and 99, so 19 MB and 99 MB. <span class="src">OSTEP 43.3</span></span></div></li>
+  </ol>
+  <p>The product R<sub>peak</sub> × T<sub>position</sub> has a plain meaning: it is the data the disk could have moved during one positioning delay, 1 MB in the example. To waste only 10% of the time positioning, each write must carry 9 times that. The factor F/(1−F) equals 1/(1−F) − 1, the same shape as page ③'s write amplification 1/(1−u), and Figure 3 shows the consequence: the last few percent of the peak are very expensive in buffer size.</p>
+  <p class="gist ks"><span class="lbl">CARRY</span>D = F/(1−F) × R<sub>peak</sub> × T<sub>position</sub>. With 10 ms and 100 MB/s: 9 MB for 90% of the peak, 19 MB for 95%, 99 MB for 99%.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>How do you find an inode that never stays in one place?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>What returns is <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">page ③ §5</a>'s idea: data that moves needs a map from a stable name to its newest place. Inodes themselves do not appear in the papers. <a href="#s12">§12.3</a> lines the imap up with the caches' DRAM index.</p>
+
+  <div class="figure" id="fig-imap">
+    <div class="scroll">
+      <svg viewBox="0 0 760 290" width="760" role="img" aria-label="Top: in a classic file system inodes sit in a fixed array and are found by arithmetic. Bottom: in LFS the newest inode is wherever it was last written, and a piece of the inode map written beside it records its address">
+        <defs>
+          <marker id="h4v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker>
+          <marker id="h4t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+        </defs>
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">Classic UNIX and FFS: inodes sit in a fixed array, found by arithmetic</text>
+        <g class="surf"><rect x="16" y="30" width="60" height="40"/><rect x="78" y="30" width="60" height="40"/><rect x="140" y="30" width="60" height="40"/><rect x="202" y="30" width="60" height="40"/><rect x="264" y="30" width="60" height="40"/></g>
+        <rect x="372" y="30" width="60" height="40" class="accs"/>
+        <g font-size="11" class="ink2" text-anchor="middle"><text x="46" y="54">inode 0</text><text x="108" y="54">inode 1</text><text x="170" y="54">inode 2</text><text x="232" y="54">inode 3</text><text x="294" y="54">inode 4</text><text x="348" y="54">…</text><text x="456" y="54">…</text></g>
+        <text x="402" y="54" font-size="11" class="ink" text-anchor="middle" font-weight="600">inode k</text>
+        <text x="16" y="92" font-size="12" class="ink">address(k) = start of the inode array + k × inode size (about 128 bytes): no lookup needed</text>
+
+        <text x="16" y="128" font-size="12" class="ink" font-weight="600">LFS: the newest inode k is wherever it was last written, and the imap records where</text>
+        <rect x="16" y="166" width="92" height="56" class="stps"/>
+        <text x="62" y="190" font-size="13" class="stp" text-anchor="middle" font-weight="600" text-decoration="line-through">I[k]</text>
+        <text x="62" y="210" font-size="10" class="mono stp" text-anchor="middle">old copy</text>
+        <text x="128" y="198" font-size="14" class="mut">…</text>
+        <rect x="150" y="166" width="92" height="56" class="ambs"/><rect x="248" y="166" width="92" height="56" class="accs"/><rect x="346" y="166" width="92" height="56" class="vios"/>
+        <g font-size="13" class="ink" font-weight="600" text-anchor="middle"><text x="196" y="190">D</text><text x="294" y="190">I[k]</text><text x="392" y="190">imap</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="294" y="210">b[0]: A0</text><text x="392" y="210">m[k]: A1</text></g>
+        <g font-size="10" class="mono mut" text-anchor="middle"><text x="196" y="238">A0</text><text x="294" y="238">A1</text></g>
+        <path d="M392 164 C 380 140, 306 140, 298 162" class="arr" style="stroke:var(--violet)" marker-end="url(#h4v)"/>
+        <path d="M290 164 C 278 140, 208 140, 200 162" class="arr-a" marker-end="url(#h4t)"/>
+        <path d="M150 246 V252 H438 V246" class="arr"/>
+        <text x="294" y="268" font-size="11" class="ink2" text-anchor="middle">written together, in one segment</text>
+        <text x="470" y="176" font-size="12" class="ink2">imap = an array: inode number →</text>
+        <text x="470" y="194" font-size="12" class="ink2">address of its newest copy (4 B each)</text>
+        <text x="470" y="218" font-size="12" class="ink2">its changed piece rides in the same</text>
+        <text x="470" y="236" font-size="12" class="ink2">segment as the data, so no extra seek</text>
+        <text x="470" y="270" font-size="12" class="amb" font-weight="600">but the imap's pieces now move too → §5</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 4. Top: in a classic UNIX file system, inode k's address is a calculation (OSTEP 43.4). Bottom: in LFS the inode moves on every update, so a piece of the inode map, written in the same segment, records where its newest copy is (OSTEP 43.5).</p>
+  </div>
+
+  <p>In a classic UNIX file system, finding an inode is arithmetic. The old UNIX file system keeps all inodes in one array at a fixed part of the disk, so the inode with number k sits at the array's start plus k times the inode size (Figure 4, top). FFS splits the array into chunks, one per cylinder group, which adds a lookup of the chunk's start address but is just as easy. <span class="src">OSTEP 43.4</span></p>
+  <p>LFS breaks this twice. Its inodes are scattered all over the disk, each written wherever its segment went. And because LFS never overwrites in place, every update of a file writes a new copy of its inode somewhere new, so the newest copy, the only one that matters, keeps moving. <span class="src">OSTEP 43.4</span></p>
+  <p>The fix is a level of indirection called the <b>inode map</b> (imap): a structure that takes an inode number and returns the disk address of the newest copy of that inode. It is naturally an array with a 4-byte disk pointer per entry, and whenever an inode is written, its imap entry is updated. <span class="src">OSTEP 43.5</span></p>
+  <p>The imap must survive crashes, so it has to be on disk too. Keeping it at a fixed location would bring the seeks back, since every update would be followed by a write to that fixed place. LFS instead writes the changed piece of the imap right next to the rest of the new data. Appending a block D to file k writes D, the new inode of k, and a piece of the imap together (Figure 4, bottom). The imap piece says inode k is at A1, and the inode says its block 0 is at A0. <span class="src">OSTEP 43.5</span></p>
+  <p>OSTEP attaches a tip here: many problems in computer science are solved by a level of indirection, from virtual memory to the very idea of a file, and the imap is a virtualization of inode numbers. Each level has an overhead, though, and as Wheeler said, the one problem indirection cannot solve is too many indirections. The imap plays the role of the FTL's map from page ②: a stable name goes in, a moving location comes out. <span class="src">OSTEP 43.5, tip on indirection</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>The imap maps an inode number to the address of that inode's newest copy. Its changed pieces are written in the same segment as the data, so keeping it current costs no seek.</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="n">§5</span><h2>Where does a lookup start, and how is a file read from scratch?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>The checkpoint region and the lookup path are file-system machinery. The papers' caches find an object through a DRAM index or a hash of its key (<a href="#s12">§12.3</a>).</p>
+
+  <div class="figure" id="fig-cr">
+    <div class="scroll">
+      <svg viewBox="0 0 760 290" width="760" role="img" aria-label="The checkpoint region at address 0 points to the imap piece at A2, which points to inode k at A1, which points to data block D at A0; four numbered read steps">
+        <defs>
+          <marker id="h5v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker>
+          <marker id="h5t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+        </defs>
+        <rect x="16" y="64" width="120" height="64" class="surf" style="stroke-width:2.5"/>
+        <text x="76" y="86" font-size="13" class="ink" text-anchor="middle" font-weight="600">CR</text>
+        <text x="76" y="104" font-size="10" class="mono ink2" text-anchor="middle">imap[k…k+N]: A2</text>
+        <text x="76" y="120" font-size="9" class="mono mut" text-anchor="middle">address 0 (fixed)</text>
+        <text x="40" y="54" font-size="12" class="ink" font-weight="600">① start here</text>
+        <text x="172" y="100" font-size="14" class="mut">…</text>
+        <rect x="230" y="64" width="92" height="64" class="ambs"/><rect x="328" y="64" width="92" height="64" class="accs"/><rect x="426" y="64" width="92" height="64" class="vios"/>
+        <g font-size="13" class="ink" font-weight="600" text-anchor="middle"><text x="276" y="86">D</text><text x="374" y="86">I[k]</text><text x="472" y="86">imap</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="374" y="104">b[0]: A0</text><text x="472" y="104">m[k]: A1</text></g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="276" y="120">A0</text><text x="374" y="120">A1</text><text x="472" y="120">A2</text></g>
+        <path d="M100 62 C 160 14, 420 14, 468 60" class="arr" style="stroke:var(--violet)" marker-end="url(#h5v)"/>
+        <text x="290" y="14" font-size="12" class="vio" font-weight="600">②</text>
+        <path d="M466 130 C 450 158, 390 158, 378 132" class="arr" style="stroke:var(--violet)" marker-end="url(#h5v)"/>
+        <text x="422" y="166" font-size="12" class="vio" font-weight="600">③</text>
+        <path d="M368 130 C 352 158, 292 158, 280 132" class="arr-a" marker-end="url(#h5t)"/>
+        <text x="324" y="166" font-size="12" class="acc" font-weight="600">④</text>
+        <rect x="560" y="64" width="186" height="64" rx="6" class="ln" stroke-dasharray="4 3"/>
+        <text x="572" y="86" font-size="11" class="mut">in memory after ②</text>
+        <text x="572" y="106" font-size="12" class="mono ink">whole imap cached</text>
+        <text x="572" y="122" font-size="11" class="mono ink2">k → A1, …</text>
+        <text x="16" y="196" font-size="12" class="ink">① Read the checkpoint region at its fixed address (here, address 0).</text>
+        <text x="16" y="216" font-size="12" class="ink">② Read the imap pieces it points to, and keep the whole imap cached in memory.</text>
+        <text x="16" y="236" font-size="12" class="ink">③ Look up inode number k in the imap (A1) and read the newest inode.</text>
+        <text x="16" y="256" font-size="12" class="ink">④ Follow the inode's pointers to the data, as in any UNIX file system (b[0] → A0).</text>
+        <text x="16" y="282" font-size="11" class="ink2">The CR is rewritten only about every 30 seconds. After step ②, a read costs the same disk I/Os as in FFS.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 5. The whole lookup chain (OSTEP 43.6–43.7, redrawn). The checkpoint region is the one thing at a fixed place; everything else is found through it.</p>
+  </div>
+
+  <p>One problem remains: the pieces of the imap are now scattered over the disk as well. Something must sit at a fixed, known place, or nothing could ever be found. LFS has exactly one such place, the <b>checkpoint region</b> (CR), at the start of the disk. The CR holds the addresses of the latest pieces of the imap. It is rewritten only periodically, about every 30 seconds, so it costs little performance. <span class="src">OSTEP 43.6</span></p>
+  <p>The on-disk structure is therefore a chain: the CR points to the imap pieces, the imap pieces hold the addresses of the inodes, and the inodes point to files and directories exactly as in a classic UNIX file system. A real LFS has a bigger CR (two of them, in fact, as §10 explains), many imap pieces, and many more inodes and data blocks than Figure 5 shows. <span class="src">OSTEP 43.6</span></p>
+  <p>Figure 5 reads a file from a cold start, with nothing in memory. ① Read the CR at its fixed address. ② Read every imap piece the CR points to, and keep the whole imap cached in memory. ③ Given inode number k, look up its address in the imap and read the newest inode. ④ From there, proceed exactly as a classic UNIX file system does: the inode's direct, indirect or doubly indirect pointers lead to the data blocks. <span class="src">OSTEP 43.7</span></p>
+  <p>Because the imap is cached, the only extra work LFS does on an ordinary read is one lookup in memory, and a read costs the same number of disk I/Os as in a typical file system. LFS makes writes fast without making reads slower. <span class="src">OSTEP 43.7</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>CR (fixed place, rewritten about every 30 s) → imap pieces (cached in memory) → inode → data. Once the imap is cached, a read costs what it costs in FFS.</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="n">§6</span><h2>How do directories work, and why don't updates cascade up to the root?</h2><span class="tag t-what">main · read</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>Directories and the cascade of updates do not appear in the papers.</p>
+
+  <div class="figure" id="fig-dir">
+    <div class="scroll">
+      <svg viewBox="0 0 760 340" width="760" role="img" aria-label="Top: creating file foo in directory dir writes five blocks in one segment, and the lookup of foo goes through the imap twice. Bottom: without the imap, moving foo's inode would force changes up to the root; with it, only the imap entry changes">
+        <defs><marker id="h6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">Creating foo (inode k) in directory dir: one segment</text>
+        <rect x="16" y="30" width="100" height="70" class="ambs"/><rect x="122" y="30" width="100" height="70" class="accs"/><rect x="228" y="30" width="100" height="70" class="ambs"/><rect x="334" y="30" width="100" height="70" class="accs"/><rect x="440" y="30" width="100" height="70" class="vios"/>
+        <g font-size="13" class="ink" font-weight="600" text-anchor="middle"><text x="66" y="52">D<tspan font-size="9" dy="3">k</tspan></text><text x="172" y="52">I[k]</text><text x="278" y="52">D<tspan font-size="9" dy="3">dir</tspan></text><text x="384" y="52">I[dir]</text><text x="490" y="52">imap</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="66" y="70">foo's data</text><text x="172" y="70">b[0]: A0</text><text x="278" y="70">(foo, k)</text><text x="384" y="70">b[0]: A2</text><text x="490" y="70">m[k]: A1</text><text x="490" y="84">m[dir]: A3</text></g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="66" y="94">A0</text><text x="172" y="94">A1</text><text x="278" y="94">A2</text><text x="384" y="94">A3</text></g>
+        <text x="560" y="44" font-size="12" class="ink" font-weight="600">Looking up foo</text>
+        <g font-size="11" class="ink2"><text x="560" y="62">① imap → dir's inode at A3</text><text x="560" y="80">② dir's inode → its data at A2</text><text x="560" y="98">③ (foo, k): foo is inode k</text><text x="560" y="116">④ imap → k's inode at A1</text><text x="560" y="134">⑤ k's inode → foo's data at A0</text></g>
+
+        <text x="16" y="170" font-size="12" class="ink" font-weight="600">foo's inode is rewritten, so it moves. What else must change?</text>
+        <text x="16" y="192" font-size="11" class="stp" font-weight="600">If directories held inode addresses</text>
+        <rect x="16" y="200" width="330" height="24" rx="4" class="stps"/><text x="26" y="216" font-size="11" class="ink">foo's inode moves to a new address</text>
+        <path d="M181 224 V232" class="arr" marker-end="url(#h6a)"/>
+        <rect x="16" y="234" width="330" height="24" rx="4" class="stps"/><text x="26" y="250" font-size="11" class="ink">dir's entry for foo must change → dir's data block moves</text>
+        <path d="M181 258 V266" class="arr" marker-end="url(#h6a)"/>
+        <rect x="16" y="268" width="330" height="24" rx="4" class="stps"/><text x="26" y="284" font-size="11" class="ink">dir's inode moves → its parent's entry must change</text>
+        <path d="M181 292 V300" class="arr" marker-end="url(#h6a)"/>
+        <rect x="16" y="302" width="330" height="24" rx="4" class="stps"/><text x="26" y="318" font-size="11" class="ink">… and so on, all the way up to the root /</text>
+        <text x="400" y="192" font-size="11" class="acc" font-weight="600">LFS: directories hold inode numbers</text>
+        <rect x="400" y="200" width="340" height="24" rx="4" class="accs"/><text x="410" y="216" font-size="11" class="ink">foo's inode moves to a new address</text>
+        <path d="M570 224 V232" class="arr" marker-end="url(#h6a)"/>
+        <rect x="400" y="234" width="340" height="24" rx="4" class="vios"/><text x="410" y="250" font-size="11" class="ink">imap entry m[k] changes (in the next segment)</text>
+        <text x="410" y="284" font-size="12" class="ink" font-weight="600">dir still says (foo, k): nothing above it changes</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 6. Top: OSTEP's file-creation example (43.8, redrawn) and the lookup of foo. Bottom: the recursive update problem. Storing inode numbers in directories, and addresses only in the imap, stops the chain after one step.</p>
+  </div>
+
+  <p>A path such as /home/remzi/foo needs directories, and in LFS a directory is what it is in a classic UNIX file system: a file whose data is a list of (name, inode number) pairs. Creating file foo in directory dir writes, in one segment, foo's data block, foo's inode, dir's new data block containing the pair (foo, k), dir's new inode, and an imap piece holding the new addresses of both inodes (Figure 6, top). <span class="src">OSTEP 43.8</span></p>
+  <p>Looking up foo then runs: the imap, usually cached, gives the address of dir's inode, A3; dir's inode points to its data block at A2; that block says foo is inode number k; the imap again gives k's inode at A1; and k's inode points to foo's data at A0. <span class="src">OSTEP 43.8</span></p>
+  <p>The imap also solves a deeper problem that every file system which never updates in place must face, the <b>recursive update problem</b> (Figure 6, bottom). When foo's inode is rewritten, it moves. If directories stored inode addresses, dir's entry for foo would have to change, so dir's data block would be rewritten and move, so dir's inode would move, so dir's parent would need a new entry, and so on all the way up to the root, for a change to one file. Because directories store inode numbers and only the imap stores addresses, the change stops at the imap: dir still says (foo, k), and only the imap entry for k changes. <span class="src">OSTEP 43.8</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Directories hold (name, inode number), never addresses. When an inode moves, only its imap entry changes; without the imap, every write would cascade up to the root.</p>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="n">§7</span><h2>What becomes garbage, and how does the cleaner reclaim it?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>Cleaning and its cost, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">page ③</a>'s 1/(1−u) again. When a cache cleans its own log, the papers count the copies as ALWA, and Kangaroo §2.2 names LFS cleaning as the example. One difference matters: a cache may drop live data instead of copying it, so a log can evict a whole segment with no copies at all (FairyWREN's large-object log, WA 1×). <a href="#fig-evict">Figure 14</a> in <a href="#s12">§12.4</a> sets the three ways side by side.</p>
+
+  <div class="figure" id="fig-clean">
+    <div class="scroll">
+      <svg viewBox="0 0 760 344" width="760" role="img" aria-label="Top: overwriting a block leaves the old data block and old inode as garbage; appending leaves only the old inode as garbage. Bottom: the cleaner compacts three partly dead segments into two full ones and frees all three">
+        <defs><marker id="h7a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">Overwrite block 0 of file k</text>
+        <rect x="16" y="28" width="92" height="56" class="stps"/><rect x="112" y="28" width="92" height="56" class="stps"/>
+        <text x="62" y="52" font-size="13" class="stp" text-anchor="middle" font-weight="600" text-decoration="line-through">D0</text>
+        <text x="158" y="52" font-size="13" class="stp" text-anchor="middle" font-weight="600" text-decoration="line-through">I[k]</text>
+        <text x="158" y="70" font-size="10" class="mono stp" text-anchor="middle">b[0]: A0</text>
+        <text x="62" y="98" font-size="9" class="mono mut" text-anchor="middle">A0</text>
+        <text x="222" y="60" font-size="14" class="mut">…</text>
+        <rect x="250" y="28" width="92" height="56" class="ambs"/><rect x="346" y="28" width="92" height="56" class="accs"/>
+        <text x="296" y="52" font-size="13" class="ink" text-anchor="middle" font-weight="600">D0′</text>
+        <text x="392" y="52" font-size="13" class="ink" text-anchor="middle" font-weight="600">I[k]</text>
+        <text x="392" y="70" font-size="10" class="mono ink2" text-anchor="middle">b[0]: A4</text>
+        <text x="296" y="98" font-size="9" class="mono mut" text-anchor="middle">A4</text>
+        <text x="460" y="52" font-size="12" class="stp" font-weight="600">both old blocks are garbage</text>
+        <text x="460" y="70" font-size="11" class="mut">(a new imap piece is written too)</text>
+
+        <text x="16" y="124" font-size="12" class="ink" font-weight="600">Append block 1 to file k instead</text>
+        <rect x="16" y="134" width="92" height="56" class="ambs"/><rect x="112" y="134" width="92" height="56" class="stps"/>
+        <text x="62" y="158" font-size="13" class="ink" text-anchor="middle" font-weight="600">D0</text>
+        <text x="158" y="158" font-size="13" class="stp" text-anchor="middle" font-weight="600" text-decoration="line-through">I[k]</text>
+        <text x="158" y="176" font-size="10" class="mono stp" text-anchor="middle">b[0]: A0</text>
+        <text x="62" y="204" font-size="9" class="mono mut" text-anchor="middle">A0</text>
+        <text x="222" y="166" font-size="14" class="mut">…</text>
+        <rect x="250" y="134" width="92" height="56" class="ambs"/><rect x="346" y="134" width="92" height="56" class="accs"/>
+        <text x="296" y="158" font-size="13" class="ink" text-anchor="middle" font-weight="600">D1</text>
+        <text x="392" y="154" font-size="13" class="ink" text-anchor="middle" font-weight="600">I[k]</text>
+        <text x="392" y="170" font-size="9" class="mono ink2" text-anchor="middle">b[0]: A0</text>
+        <text x="392" y="182" font-size="9" class="mono ink2" text-anchor="middle">b[1]: A4</text>
+        <text x="296" y="204" font-size="9" class="mono mut" text-anchor="middle">A4</text>
+        <text x="460" y="158" font-size="12" class="stp" font-weight="600">the old inode is garbage; D0 stays live</text>
+        <text x="460" y="176" font-size="11" class="mut">(the new inode still points to A0)</text>
+
+        <text x="16" y="234" font-size="12" class="ink" font-weight="600">The cleaner: read M = 3 partly dead segments, write their live blocks into N = 2, free all 3</text>
+        <g>
+          <rect x="16" y="246" width="30" height="24" class="ambs"/><rect x="46" y="246" width="30" height="24" class="stps"/><rect x="76" y="246" width="30" height="24" class="ambs"/><rect x="106" y="246" width="30" height="24" class="ambs"/><rect x="136" y="246" width="30" height="24" class="stps"/><rect x="166" y="246" width="30" height="24" class="ambs"/>
+          <rect x="16" y="276" width="30" height="24" class="stps"/><rect x="46" y="276" width="30" height="24" class="ambs"/><rect x="76" y="276" width="30" height="24" class="ambs"/><rect x="106" y="276" width="30" height="24" class="stps"/><rect x="136" y="276" width="30" height="24" class="ambs"/><rect x="166" y="276" width="30" height="24" class="ambs"/>
+          <rect x="16" y="306" width="30" height="24" class="ambs"/><rect x="46" y="306" width="30" height="24" class="ambs"/><rect x="76" y="306" width="30" height="24" class="stps"/><rect x="106" y="306" width="30" height="24" class="stps"/><rect x="136" y="306" width="30" height="24" class="ambs"/><rect x="166" y="306" width="30" height="24" class="ambs"/>
+        </g>
+        <g font-size="10" class="mono mut"><text x="204" y="262">S1</text><text x="204" y="292">S2</text><text x="204" y="322">S3</text></g>
+        <path d="M236 288 L320 288" class="arr" marker-end="url(#h7a)"/>
+        <text x="278" y="280" font-size="10" class="ink2" text-anchor="middle">copy live</text>
+        <g class="ambs">
+          <rect x="336" y="260" width="30" height="24"/><rect x="366" y="260" width="30" height="24"/><rect x="396" y="260" width="30" height="24"/><rect x="426" y="260" width="30" height="24"/><rect x="456" y="260" width="30" height="24"/><rect x="486" y="260" width="30" height="24"/>
+          <rect x="336" y="292" width="30" height="24"/><rect x="366" y="292" width="30" height="24"/><rect x="396" y="292" width="30" height="24"/><rect x="426" y="292" width="30" height="24"/><rect x="456" y="292" width="30" height="24"/><rect x="486" y="292" width="30" height="24"/>
+        </g>
+        <g font-size="10" class="mono mut"><text x="524" y="276">S4</text><text x="524" y="308">S5</text></g>
+        <text x="560" y="262" font-size="11" class="ink2">3 segments freed, 2 used:</text>
+        <text x="560" y="280" font-size="11" class="ink2">net gain, 1 free segment</text>
+        <text x="560" y="302" font-size="11" class="ink2">u = 12/18 = 2/3, so by ③ §3</text>
+        <text x="560" y="322" font-size="12" class="vio" font-weight="600">WA = 1/(1 − 2/3) = 3</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 7. Top: the two garbage examples of OSTEP 43.9 (imap pieces omitted, as OSTEP does). Bottom: cleaning segment by segment; amber blocks are live, red blocks dead. The cost follows the same law as an SSD's garbage collection.</p>
+  </div>
+
+  <p>LFS keeps writing the newest version of everything to new places, so old versions pile up across the disk, and OSTEP calls them <b>garbage</b>. Figure 7, top, shows two cases. Overwriting block 0 of file k writes a new data block and a new inode, so the old data block and the old inode are both garbage. Appending block 1 instead writes the new block and a new inode; the old inode is garbage, but the old block 0 is still pointed to by the new inode, so it stays live. <span class="src">OSTEP 43.9</span></p>
+  <p>LFS could keep the old versions and let users restore earlier contents of a file, which would make it a <b>versioning file system</b>. It keeps only the newest live version instead, so in the background it must find the dead versions and free their space. This is <b>cleaning</b>, a form of garbage collection. <span class="src">OSTEP 43.9</span></p>
+  <p>Freeing single dead blocks would not help. The disk would fill with small holes between live blocks, and LFS would lose what it needs most, large contiguous free regions to write segments into. So the cleaner works segment by segment (Figure 7, bottom). It reads M partly used segments, works out which of their blocks are still live, writes just the live blocks into N new segments with N &lt; M, and frees the M old ones for new writes. <span class="src">OSTEP 43.9</span></p>
+  <p>This is page ③ §2 almost word for word, with the segment in place of the erase block and the cleaner in place of the garbage collector. The arithmetic of page ③ §3 carries over unchanged. In Figure 7, 12 of the 18 old blocks are live, so u = 2/3, and every segment freed for new data cost two segments of copying, an amplification of 1/(1 − 2/3) = 3.</p>
+  <p>Two questions remain, which OSTEP names as mechanism and policy: how to tell which blocks in a segment are live (§8), and which segments to clean, and when (§9). <span class="src">OSTEP 43.9</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Old versions become garbage. The cleaner reads M partly dead segments, writes their live blocks into N &lt; M new ones, and frees whole segments. The cost law is page ③'s: u = live fraction, WA = 1/(1−u).</p>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="n">§8</span><h2>How does the cleaner know which blocks are still live?</h2><span class="tag t-what">main · read</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>The papers keep liveness in their DRAM index instead; each entry of Kangaroo's log index has a valid bit (Kangaroo §4.2; <a href="#s12">§12.5</a>).</p>
+
+  <div class="figure" id="fig-live">
+    <div class="scroll">
+      <svg viewBox="0 0 760 246" width="760" role="img" aria-label="The segment summary says the block at A0 belongs to inode k at offset 0; the imap gives inode k's address A1; inode k's pointer 0 is A0, so the block is live">
+        <defs>
+          <marker id="h8v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker>
+          <marker id="h8t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+          <marker id="h8k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker>
+        </defs>
+        <rect x="16" y="70" width="100" height="64" class="surf" style="stroke-width:2"/><rect x="122" y="70" width="100" height="64" class="ambs"/><rect x="228" y="70" width="100" height="64" class="accs"/><rect x="334" y="70" width="100" height="64" class="vios"/>
+        <g font-size="13" class="ink" font-weight="600" text-anchor="middle"><text x="66" y="92">SS</text><text x="172" y="92">D</text><text x="278" y="92">I[k]</text><text x="384" y="92">imap</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="66" y="110">A0: (k, 0)</text><text x="278" y="110">b[0]: A0</text><text x="384" y="110">m[k]: A1</text></g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="66" y="126">segment summary</text><text x="172" y="126">A0</text><text x="278" y="126">A1</text></g>
+        <path d="M66 68 C 80 36, 160 36, 170 66" class="arr" marker-end="url(#h8k)"/>
+        <text x="118" y="34" font-size="12" class="ink" font-weight="600">①</text>
+        <path d="M384 68 C 370 36, 290 36, 282 66" class="arr" style="stroke:var(--violet)" marker-end="url(#h8v)"/>
+        <text x="330" y="34" font-size="12" class="vio" font-weight="600">②</text>
+        <path d="M276 136 C 260 166, 186 166, 174 138" class="arr-a" marker-end="url(#h8t)"/>
+        <text x="224" y="176" font-size="12" class="acc" font-weight="600">③</text>
+        <g font-size="11" class="mono ink">
+          <text x="470" y="80">(N, T) = SegmentSummary[A];</text>
+          <text x="470" y="100">inode  = Read(imap[N]);</text>
+          <text x="470" y="120">if (inode[T] == A)  // live</text>
+          <text x="470" y="140">else                // garbage</text>
+        </g>
+        <text x="16" y="200" font-size="12" class="ink">① The summary says the block at A0 belongs to inode k, offset 0.</text>
+        <text x="16" y="218" font-size="12" class="ink">② The imap says inode k's newest copy is at A1; read it (it may already be in memory).</text>
+        <text x="16" y="236" font-size="12" class="ink">③ Inode k's pointer 0 is A0, the very address being checked, so the block is live. Any other address: garbage.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 8. The liveness check (OSTEP 43.10, redrawn), with OSTEP's pseudocode. The segment summary block, marked SS, sits at the head of each segment.</p>
+  </div>
+
+  <p>LFS adds a small structure at the head of every segment, the <b>segment summary block</b>. For each data block in the segment it records the block's inode number, which says what file it belongs to, and its offset, which says which block of the file it is. <span class="src">OSTEP 43.10</span></p>
+  <p>To decide whether the block at address A is live (Figure 8): ① read its entry in the segment summary, inode number N and offset T; ② look up N in the imap and read inode N, which may already be in memory; ③ look in the inode, or in one of its indirect blocks, for where it thinks block T of the file lives. If that is exactly A, the block is live. If the inode points anywhere else, this copy is dead and no longer needed. <span class="src">OSTEP 43.10</span></p>
+  <p>LFS also has a shortcut. When a file is truncated or deleted, LFS increases the file's version number and records the new number in the imap, and the segment records version numbers as well. If the version stored in the segment differs from the one in the imap, the block is dead, and the cleaner never has to read the inode. <span class="src">OSTEP 43.10</span></p>
+  <p>Compare the FTL (page ③ §2). There, the OOB note on a flash page says which logical block the page holds, and the page is live exactly when the map still points to it. The segment summary is LFS's OOB note, and the imap with the inode is its map.</p>
+  <p class="gist"><span class="lbl">CARRY</span>Liveness: the segment summary says the block at A is (inode N, offset T), and the block is live exactly when inode N's pointer T still equals A. A version number kept in the imap short-cuts deleted files.</p>
+</section>
+
+<section id="s9">
+  <div class="sec-head"><span class="n">§9</span><h2>Which segments should be cleaned, and when?</h2><span class="tag t-ctl">skim · figure + carry</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>Keeping hot and cold data apart, so that some units die whole. The page marks this section skim, but for the papers read it in full: FairyWREN splits every set into a hot and a cold half, each with its own log, and groups data of similar lifetime into one erase unit (FairyWREN §5.1, §5.4; <a href="#s12">§12.6</a>).</p>
+
+  <div class="figure" id="fig-hotcold">
+    <div class="scroll">
+      <svg viewBox="0 0 760 222" width="760" role="img" aria-label="A hot segment's live fraction falls from five sixths to one sixth over time; a cold segment stays at five sixths">
+        <text x="16" y="18" font-size="12" class="mut">live fraction of two segments over time (illustrative)</text>
+        <g font-size="11" class="mono mut" text-anchor="middle"><text x="232" y="40">now</text><text x="432" y="40">later</text><text x="632" y="40">much later</text></g>
+        <text x="16" y="72" font-size="12" class="amb" font-weight="600">hot segment</text>
+        <text x="16" y="138" font-size="12" class="acc" font-weight="600">cold segment</text>
+        <g>
+          <rect x="160" y="56" width="24" height="24" class="ambs"/><rect x="184" y="56" width="24" height="24" class="ambs"/><rect x="208" y="56" width="24" height="24" class="ambs"/><rect x="232" y="56" width="24" height="24" class="ambs"/><rect x="256" y="56" width="24" height="24" class="ambs"/><rect x="280" y="56" width="24" height="24" class="stps"/>
+          <rect x="360" y="56" width="24" height="24" class="ambs"/><rect x="384" y="56" width="24" height="24" class="stps"/><rect x="408" y="56" width="24" height="24" class="ambs"/><rect x="432" y="56" width="24" height="24" class="stps"/><rect x="456" y="56" width="24" height="24" class="ambs"/><rect x="480" y="56" width="24" height="24" class="stps"/>
+          <rect x="560" y="56" width="24" height="24" class="stps"/><rect x="584" y="56" width="24" height="24" class="stps"/><rect x="608" y="56" width="24" height="24" class="ambs"/><rect x="632" y="56" width="24" height="24" class="stps"/><rect x="656" y="56" width="24" height="24" class="stps"/><rect x="680" y="56" width="24" height="24" class="stps"/>
+          <rect x="160" y="122" width="24" height="24" class="ambs"/><rect x="184" y="122" width="24" height="24" class="ambs"/><rect x="208" y="122" width="24" height="24" class="ambs"/><rect x="232" y="122" width="24" height="24" class="stps"/><rect x="256" y="122" width="24" height="24" class="ambs"/><rect x="280" y="122" width="24" height="24" class="ambs"/>
+          <rect x="360" y="122" width="24" height="24" class="ambs"/><rect x="384" y="122" width="24" height="24" class="ambs"/><rect x="408" y="122" width="24" height="24" class="ambs"/><rect x="432" y="122" width="24" height="24" class="stps"/><rect x="456" y="122" width="24" height="24" class="ambs"/><rect x="480" y="122" width="24" height="24" class="ambs"/>
+          <rect x="560" y="122" width="24" height="24" class="ambs"/><rect x="584" y="122" width="24" height="24" class="ambs"/><rect x="608" y="122" width="24" height="24" class="ambs"/><rect x="632" y="122" width="24" height="24" class="stps"/><rect x="656" y="122" width="24" height="24" class="ambs"/><rect x="680" y="122" width="24" height="24" class="ambs"/>
+        </g>
+        <g font-size="11" class="mono ink2" text-anchor="middle">
+          <text x="232" y="96">u = 5/6</text><text x="432" y="96">3/6</text><text x="632" y="96" class="vio" font-weight="600">1/6</text>
+          <text x="232" y="162">u = 5/6</text><text x="432" y="162">5/6</text><text x="632" y="162">5/6</text>
+        </g>
+        <text x="16" y="192" font-size="12" class="ink">hot: its blocks keep dying, so waiting lowers u from 5/6 to 1/6. Clean it later.</text>
+        <text x="16" y="212" font-size="12" class="ink">cold: its dead block stays dead and the rest stay live, so waiting gains nothing. Clean it sooner.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 9. Why the original LFS cleans cold segments sooner and hot segments later (OSTEP 43.11). The fractions are illustrative.</p>
+  </div>
+
+  <p>When to clean is the easy half: periodically, during idle time, or when the disk is full and there is no choice. Which segments to clean is the hard half, and the subject of many papers. The original LFS paper separates <b>hot</b> segments, whose contents are being overwritten often, from <b>cold</b> ones, whose contents are stable (Figure 9). A hot segment is best left alone for a while: its blocks keep dying as newer versions are written elsewhere, so the longer the cleaner waits, the less it has to copy. A cold segment may hold a few dead blocks, but the rest will stay live, so waiting gains nothing and its free space stays locked up. Rosenblum and Ousterhout concluded that cold segments should be cleaned sooner and hot ones later, and built a heuristic to do that; later work found better policies (Matthews et al., 1997). <span class="src">OSTEP 43.11</span></p>
+  <p>In page ③'s terms, the policy chooses victims with a low u. A hot segment cleaned too early has u near 1 and costs dearly; the same segment cleaned later has u near 0. Grouping data by how soon it will die, the SSD rule of <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10.1</a>, is the same idea seen from the writer's side.</p>
+  <p class="gist"><span class="lbl">CARRY</span>Clean when idle or forced. Clean cold segments sooner and hot ones later: waiting lets hot segments empty themselves, which keeps u, and so the cost, low.</p>
+</section>
+
+<section id="s10">
+  <div class="sec-head"><span class="n">§10</span><h2>What happens if the system crashes in the middle of a write?</h2><span class="tag t-what">main · read</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>Crash recovery is not what the papers study. KVell, the one persistent store among them, keeps no commit log and acknowledges an update only once it sits at its final place (KVell §1). What a cache gives up by forgetting on restart: <a href="#s12">§12.8</a>.</p>
+
+  <div class="figure" id="fig-crash">
+    <div class="scroll">
+      <svg viewBox="0 0 760 284" width="760" role="img" aria-label="Top: the log of segments between two checkpoint regions at the two ends of the disk; segments written after the last checkpoint are recovered by rolling forward. Bottom: a consistent checkpoint region has matching timestamps, a torn one does not">
+        <defs><marker id="h10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="18" font-size="12" class="ink" font-weight="600">The log on disk, with a checkpoint region at each end</text>
+        <rect x="16" y="30" width="80" height="50" class="surf" style="stroke-width:2.5"/><rect x="664" y="30" width="80" height="50" class="surf" style="stroke-width:2.5"/>
+        <g font-size="12" class="ink" font-weight="600" text-anchor="middle"><text x="56" y="60">CR A</text><text x="704" y="60">CR B</text></g>
+        <g><rect x="120" y="30" width="92" height="50" class="ambs"/><rect x="224" y="30" width="92" height="50" class="ambs"/><rect x="328" y="30" width="92" height="50" class="ambs"/><rect x="432" y="30" width="92" height="50" class="accs"/><rect x="536" y="30" width="92" height="50" class="accs"/></g>
+        <g font-size="12" class="ink" text-anchor="middle"><text x="166" y="60">S1</text><text x="270" y="60">S2</text><text x="374" y="60">S3</text><text x="478" y="60">S4</text><text x="582" y="60">S5</text></g>
+        <path d="M212 55 L222 55" class="arr" marker-end="url(#h10)"/><path d="M316 55 L326 55" class="arr" marker-end="url(#h10)"/><path d="M420 55 L430 55" class="arr" marker-end="url(#h10)"/><path d="M524 55 L534 55" class="arr" marker-end="url(#h10)"/>
+        <text x="270" y="98" font-size="11" class="ink2" text-anchor="middle">covered by the last checkpoint (its log end = S3)</text>
+        <text x="530" y="98" font-size="11" class="acc" text-anchor="middle">written since: roll forward reads these</text>
+
+        <text x="16" y="136" font-size="12" class="ink" font-weight="600">Each CR is written header → body → footer, with a timestamp at both ends</text>
+        <rect x="16" y="148" width="70" height="40" class="accs"/><rect x="86" y="148" width="150" height="40" class="accs"/><rect x="236" y="148" width="70" height="40" class="accs"/>
+        <g font-size="11" class="ink" text-anchor="middle"><text x="51" y="172">header T5</text><text x="161" y="172">imap pointers, log end</text><text x="271" y="172">footer T5</text></g>
+        <text x="16" y="208" font-size="12" class="acc" font-weight="600">CR A: timestamps agree ✓ use it</text>
+        <rect x="400" y="148" width="70" height="40" class="stps"/><rect x="470" y="148" width="150" height="40" class="stps"/><rect x="620" y="148" width="70" height="40" class="stps"/>
+        <g font-size="11" class="ink" text-anchor="middle"><text x="435" y="172">header T6</text><text x="545" y="172">half written …</text><text x="655" y="172">footer T4</text></g>
+        <text x="400" y="208" font-size="12" class="stp" font-weight="600">CR B: crash mid-update, timestamps differ ✗ ignore</text>
+        <text x="16" y="246" font-size="12" class="ink">Reboot: take the newest CR whose timestamps agree, load the imap it points to, then roll forward through the</text>
+        <text x="16" y="266" font-size="12" class="ink">segments written after it, applying every valid update found. Without that, up to ~30 s of updates would be lost.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 10. Crash recovery in LFS (OSTEP 43.12). Top: segments form a log, each pointing to the next. Bottom: the two checkpoint regions are written alternately, and a torn one is recognized by its mismatched timestamps.</p>
+  </div>
+
+  <p>During normal operation LFS buffers writes in a segment and writes the segment out when it is full or when some time has passed. The segments form a log: the CR points to a head and a tail segment, and each segment points to the next one to be written. LFS also rewrites the CR periodically. A crash can strike during either kind of write. <span class="src">OSTEP 43.12</span></p>
+  <p><b>A crash during a CR update.</b> LFS keeps two CRs, one at each end of the disk, and writes them alternately. It writes each one carefully: first a header with a timestamp, then the body, then a final block with a timestamp. If the system crashes partway through, the two timestamps of that CR disagree, and LFS recognizes it as torn. On reboot it uses the most recent CR whose timestamps agree, so it always starts from a consistent CR (Figure 10, bottom). <span class="src">OSTEP 43.12</span></p>
+  <p><b>A crash during a segment write.</b> The CR is rewritten only every 30 seconds or so, so the last consistent checkpoint may be old, and restarting from it alone would lose the last many seconds of updates. LFS instead <b>rolls forward</b>, a technique borrowed from databases. Starting from the last checkpoint, it finds the end of the log recorded in the CR, reads the segments written after it, and applies every valid update it finds, recovering much of the data and metadata written since the checkpoint (Figure 10, top). Rosenblum's dissertation has the details. <span class="src">OSTEP 43.12</span></p>
+  <p>This is page ② §7's map-recovery problem again. The FTL rebuilds its map after power loss by scanning the OOB areas, and higher-end SSDs speed that up with LFS's own tools, checkpoints and logs. <span class="src">OSTEP 44.7, aside</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Two CRs, written alternately, each with a timestamp at both ends; a torn CR is ignored. After a crash, start from the newest consistent CR and roll forward through the segments written since.</p>
+</section>
+
+<section id="s11">
+  <div class="sec-head"><span class="n">§11</span><h2>What did LFS leave behind, and how does it line up with the FTL?</h2><span class="tag t-ks">★ core · the synthesis</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>The one-design-at-two-layers picture. The papers stack it once more: a log-structured cache runs on a log-structured FTL, and each layer cleans for itself (tree node 1.3.3). <a href="#s12">§12</a> draws that third layer (Figure 11).</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>LFS (CHAPTER 43)</th><th>LOG-STRUCTURED FTL (CHAPTER 44)</th><th>THE SHARED IDEA</th></tr></thead>
+      <tbody>
+        <tr class="win-a"><td><b>Why write somewhere new</b>: a disk is fastest when it never repositions</td><td>Flash cannot overwrite, and erases are per block</td><td>Different reasons, the same design.</td></tr>
+        <tr><td><b>Segment</b> (§2)</td><td>Erase block</td><td>The unit written in one go and reclaimed in one go.</td></tr>
+        <tr><td><b>Inode map</b> (§4)</td><td>FTL map</td><td>A stable name → its current location, which changes on every write.</td></tr>
+        <tr><td><b>Checkpoint region + roll forward</b> (§5, §10)</td><td>Map rebuilt from an OOB scan, sped up by checkpoints and logs</td><td>The map itself has to be found again after a crash.</td></tr>
+        <tr><td><b>Cleaner</b> (§7)</td><td>Garbage collector</td><td>Copy the live part out, reuse the whole unit; cost 1/(1−u).</td></tr>
+        <tr><td><b>Segment summary block</b> (§8)</td><td>OOB area of each page</td><td>Each stored block remembers whose it is, so liveness can be checked.</td></tr>
+        <tr><td><b>Hot/cold cleaning policy</b> (§9)</td><td>Grouping by death time</td><td>Reclaim units when little in them is still live.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>LFS's idea, write to unused space and reclaim the old space later by cleaning, is called <b>shadow paging</b> in databases and <b>copy-on-write</b> in file systems. Its large writes suit many devices. On a hard disk they minimize positioning; on RAID-4 and RAID-5 they avoid the small-write problem entirely; and on flash, He et al. found that large requests are needed for high performance, so an LFS-style file system may suit SSDs well. <span class="src">OSTEP 43.13</span></p>
+  <p>The price was cleaning, and cleaning became the centre of a long controversy. Seltzer et al. (1995) showed that LFS sometimes performs poorly, particularly for workloads with many fsync() calls, such as databases, and OSTEP suggests such concerns may have limited LFS's early impact. Mogul (1994) added that buffering writes for too long and then sending them in a big burst can hurt reads. <span class="src">OSTEP 43.13 and references [SS+95], [M94]</span></p>
+  <p>Yet the design lives on in NetApp's WAFL, Sun's ZFS, Linux btrfs, and the FTL inside flash SSDs (pages ② and ③). WAFL turned the flaw into a feature: by keeping old versions available as snapshots, it has to clean less often, and users can get back files they deleted by mistake. OSTEP's tip for this is "turn flaws into virtues". <span class="src">OSTEP 43.13 and its tip</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>LFS and the log-structured FTL are one design at two layers: append to fresh space, keep a map from stable names to current places, and clean. They share the costs too: cleaning traffic set by u, and a map that must be found again after a crash.</p>
+</section>
+
+<section id="s12">
+  <div class="sec-head"><span class="n">§12</span><h2>What does LFS carry into the OpenStd papers?</h2><span class="tag t-ks">★ core · for the papers</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>All of it. <a href="2026-10-08-storage-3-5-flash-caches.html">Page 3.5</a> holds the costs the papers count, DRAM per object and ALWA × DLWA, and the chain of papers. This section holds the mechanisms they take from LFS. The two link to each other instead of repeating.</p>
+
+  <h3>12.1 · One design, a third time</h3>
+  <div class="figure" id="fig-layers">
+    <div class="scroll">
+      <svg viewBox="0 0 760 384" width="760" role="img" aria-label="Left: a log-structured flash cache writes into the SSD's FTL, which writes into flash chips; both the cache and the FTL append, keep a map and reclaim, so two logs are stacked. Right: LFS on a hard disk with the same three parts. Only the cache may drop live data">
+        <defs><marker id="h12a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">The same three parts at every layer: append to fresh space, map a stable name to the current place, reclaim whole units</text>
+        <rect x="16" y="36" width="456" height="112" rx="6" class="vios"/>
+        <text x="28" y="56" font-size="12.5" class="vio" font-weight="600">a log-structured flash cache: the papers</text>
+        <text x="28" y="76" font-size="11.5" class="ink">appends objects, buffered into segments in DRAM (12.2)</text>
+        <text x="28" y="94" font-size="11.5" class="ink">map: a DRAM index, key → place on flash; sets use a hash (12.3)</text>
+        <text x="28" y="112" font-size="11.5" class="ink">reclaims: evicts the oldest segment, and MAY DROP live data (12.4)</text>
+        <text x="28" y="136" font-size="10.5" class="mut">Kangaroo’s log · CacheLib’s large-object cache · FairyWREN · Nemo</text>
+        <path d="M244 150 V172" class="arr" marker-end="url(#h12a)"/>
+        <text x="254" y="166" font-size="10.5" class="mut">writes 4 KB blocks to logical addresses</text>
+        <rect x="16" y="176" width="456" height="94" rx="6" class="accs"/>
+        <text x="28" y="196" font-size="12.5" class="ink" font-weight="600">the SSD’s FTL: pages ② and ③</text>
+        <text x="28" y="216" font-size="11.5" class="ink2">appends pages into erase blocks</text>
+        <text x="28" y="234" font-size="11.5" class="ink2">map: the page map, logical → physical page</text>
+        <text x="28" y="252" font-size="11.5" class="ink2">reclaims: garbage collection, must copy every live page</text>
+        <path d="M244 272 V290" class="arr" marker-end="url(#h12a)"/>
+        <rect x="16" y="294" width="456" height="28" rx="6" class="surf"/>
+        <text x="28" y="313" font-size="11.5" class="ink2">flash chips: program a page, erase a block</text>
+        <path d="M480 44 H492 V262 H480" class="ln" style="stroke:var(--violet);stroke-width:1.6;fill:none"/>
+        <text x="500" y="146" font-size="10.5" class="vio">two logs stacked,</text>
+        <text x="500" y="160" font-size="10.5" class="vio">each reclaims (12.7)</text>
+        <rect x="604" y="36" width="140" height="234" rx="6" class="ambs"/>
+        <text x="614" y="56" font-size="12.5" class="ink" font-weight="600">LFS: this page</text>
+        <text x="614" y="78" font-size="11" class="ink2">appends blocks and</text>
+        <text x="614" y="96" font-size="11" class="ink2">inodes in segments</text>
+        <text x="614" y="132" font-size="11" class="ink2">map: the imap,</text>
+        <text x="614" y="150" font-size="11" class="ink2">inode → newest inode</text>
+        <text x="614" y="186" font-size="11" class="ink2">reclaims: the cleaner,</text>
+        <text x="614" y="204" font-size="11" class="ink2">must copy every</text>
+        <text x="614" y="222" font-size="11" class="ink2">live block</text>
+        <rect x="604" y="294" width="140" height="28" rx="6" class="surf"/>
+        <text x="614" y="313" font-size="11.5" class="ink2">a hard disk</text>
+        <rect x="16" y="338" width="728" height="30" rx="6" class="stps"/>
+        <text x="28" y="358" font-size="12" class="stp" font-weight="600">Only the top layer may lose data. That one freedom is where the papers’ designs start (12.4).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 11. One design at three layers. LFS (right) and the SSD's FTL (pages ② and ③) were lined up in §11. The papers' log-structured caches add a third layer on top of the FTL, with the same three parts, so on an SSD two logs are stacked. The numbers in brackets are this section's subsections.</p>
+  </div>
+  <p>§11 lined LFS up with the SSD's FTL; the papers' log-structured caches are the same design a third time, one layer above the FTL. Kangaroo's small log, CacheLib's cache for large objects, the logs inside FairyWREN and Nemo's set-groups all append, keep a map and reclaim whole units, and Kangaroo names cleaning in log-structured file systems as its first example of application-level write amplification. They append for a reason of their own, since flash has no positioning: a 100-byte object is far smaller than a 4 KB page, and appending packs many into one write (<a href="2026-10-08-storage-3-5-flash-caches.html#s1">page 3.5 §1–§2</a>). The red bar at the bottom is the one difference, and 12.4 starts from it. <span class="src">Kangaroo, SOSP 2021, §2.2 and §4.2 · FairyWREN, OSDI 2024, §5.2 · Nemo, ASPLOS 2026, §4.1</span></p>
+
+  <h3>12.2 · Segments, sized by the erase unit</h3>
+  <div class="figure" id="fig-euseg">
+    <div class="scroll">
+      <svg viewBox="0 0 760 414" width="760" role="img" aria-label="Top: LFS sizes segments by the disk, a flash cache by the erase unit. Middle: a DRAM buffer fills, is written to one erase unit, is later evicted whole, and the unit is erased with nothing to copy. Bottom: a zoned drive allows only a few open units, often fewer than ten; FairyWREN uses four">
+        <defs><marker id="h12s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">A cache’s segment is one erase unit, so evicting it empties the unit whole</text>
+        <circle cx="24" cy="46" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="50" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="38" y="50" font-size="11.5" class="ink" font-weight="600">What sets the segment size?</text>
+        <rect x="16" y="60" width="300" height="64" rx="6" class="surf"/>
+        <text x="28" y="80" font-size="11.5" class="ink" font-weight="600">LFS (§3): the disk</text>
+        <text x="28" y="98" font-size="10.5" class="ink2">large enough that seek and rotation</text>
+        <text x="28" y="114" font-size="10.5" class="ink2">become a small share of each write</text>
+        <rect x="332" y="60" width="412" height="64" rx="6" class="accs"/>
+        <text x="344" y="80" font-size="11.5" class="acc" font-weight="600">a flash cache: the erase unit</text>
+        <text x="344" y="98" font-size="10.5" class="ink2">flash has no seek; its unit of reuse is the erase unit, so</text>
+        <text x="344" y="114" font-size="10.5" class="ink2">FairyWREN’s large-object cache makes each segment one (§5.2)</text>
+        <circle cx="24" cy="148" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="152" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="38" y="152" font-size="11.5" class="ink" font-weight="600">One segment’s life</text>
+        <rect x="16" y="162" width="160" height="76" rx="6" class="vios"/>
+        <text x="26" y="180" font-size="11" class="vio" font-weight="600">DRAM buffer</text>
+        <rect x="26" y="190" width="15" height="28" class="ambs"/>
+        <rect x="43" y="190" width="15" height="28" class="ambs"/>
+        <rect x="60" y="190" width="15" height="28" class="ambs"/>
+        <rect x="77" y="190" width="15" height="28" class="ambs"/>
+        <rect x="94" y="190" width="15" height="28" class="ambs"/>
+        <rect x="111" y="190" width="15" height="28" class="ambs"/>
+        <rect x="128" y="190" width="15" height="28" class="ambs"/>
+        <rect x="145" y="190" width="15" height="28" class="ambs"/>
+        <text x="26" y="232" font-size="10" class="mut">fills with new objects</text>
+        <path d="M176 200 H200" class="arr" marker-end="url(#h12s)"/>
+        <rect x="202" y="162" width="176" height="76" rx="6" class="surf"/>
+        <text x="212" y="180" font-size="11" class="ink" font-weight="600">erase unit 7</text>
+        <rect x="212" y="190" width="17" height="28" class="ambs"/>
+        <rect x="231" y="190" width="17" height="28" class="ambs"/>
+        <rect x="250" y="190" width="17" height="28" class="ambs"/>
+        <rect x="269" y="190" width="17" height="28" class="ambs"/>
+        <rect x="288" y="190" width="17" height="28" class="ambs"/>
+        <rect x="307" y="190" width="17" height="28" class="ambs"/>
+        <rect x="326" y="190" width="17" height="28" class="ambs"/>
+        <rect x="345" y="190" width="17" height="28" class="ambs"/>
+        <text x="212" y="232" font-size="10" class="mut">written whole, in order</text>
+        <path d="M378 200 H402" class="arr" marker-end="url(#h12s)"/>
+        <rect x="404" y="162" width="176" height="76" rx="6" class="surf"/>
+        <text x="414" y="180" font-size="11" class="ink" font-weight="600">later: evicted whole</text>
+        <rect x="414" y="190" width="17" height="28" class="stps"/>
+        <path d="M418 204.0 H427" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="433" y="190" width="17" height="28" class="stps"/>
+        <path d="M437 204.0 H446" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="452" y="190" width="17" height="28" class="stps"/>
+        <path d="M456 204.0 H465" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="471" y="190" width="17" height="28" class="stps"/>
+        <path d="M475 204.0 H484" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="490" y="190" width="17" height="28" class="stps"/>
+        <path d="M494 204.0 H503" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="509" y="190" width="17" height="28" class="stps"/>
+        <path d="M513 204.0 H522" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="528" y="190" width="17" height="28" class="stps"/>
+        <path d="M532 204.0 H541" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="547" y="190" width="17" height="28" class="stps"/>
+        <path d="M551 204.0 H560" style="stroke:var(--stop);stroke-width:1.4"/>
+        <text x="414" y="232" font-size="10" class="mut">every page dies at once</text>
+        <path d="M580 200 H604" class="arr" marker-end="url(#h12s)"/>
+        <rect x="606" y="162" width="138" height="76" rx="6" class="accs"/>
+        <text x="616" y="184" font-size="11.5" class="acc" font-weight="600">erase: u = 0</text>
+        <text x="616" y="202" font-size="10.5" class="ink2">nothing to copy,</text>
+        <text x="616" y="222" font-size="12" class="acc" font-weight="600">WA = 1</text>
+        <circle cx="24" cy="264" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="268" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="38" y="268" font-size="11.5" class="ink" font-weight="600">Only a few units can be open at once</text>
+        <text x="38" y="286" font-size="10.5" class="ink2">A ZNS or FDP drive buffers each unit still being filled, so it allows few: “often less than 10” (FairyWREN §5.4).</text>
+        <rect x="38" y="298" width="104" height="40" rx="4" class="vios"/>
+        <text x="90" y="314" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">large-object</text>
+        <text x="90" y="328" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">cache</text>
+        <rect x="148" y="298" width="104" height="40" rx="4" class="vios"/>
+        <text x="200" y="314" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">small-object</text>
+        <text x="200" y="328" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">log, 64 slices</text>
+        <rect x="258" y="298" width="104" height="40" rx="4" class="vios"/>
+        <text x="310" y="322" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">sets</text>
+        <rect x="368" y="298" width="104" height="40" rx="4" class="vios"/>
+        <text x="420" y="322" font-size="9.5" class="vio" text-anchor="middle" font-weight="600">sets</text>
+        <rect x="478" y="298" width="60" height="40" rx="4" class="surf" style="stroke-dasharray:3 3"/>
+        <text x="508" y="322" font-size="9.5" class="mut" text-anchor="middle">free</text>
+        <rect x="544" y="298" width="60" height="40" rx="4" class="surf" style="stroke-dasharray:3 3"/>
+        <text x="574" y="322" font-size="9.5" class="mut" text-anchor="middle">free</text>
+        <rect x="610" y="298" width="60" height="40" rx="4" class="surf" style="stroke-dasharray:3 3"/>
+        <text x="640" y="322" font-size="9.5" class="mut" text-anchor="middle">free</text>
+        <rect x="676" y="298" width="60" height="40" rx="4" class="surf" style="stroke-dasharray:3 3"/>
+        <text x="706" y="322" font-size="9.5" class="mut" text-anchor="middle">free</text>
+        <text x="38" y="356" font-size="10.5" class="ink2">FairyWREN needs four. Its small-object log is cut into 64 slices to save 6 bits in each DRAM index entry,</text>
+        <text x="38" y="372" font-size="10.5" class="ink2">and the slices share one open unit instead of taking 64 (§5.4).</text>
+        <circle cx="24" cy="396" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="400" font-size="10" class="vio" font-weight="600" text-anchor="middle">4</text>
+        <text x="38" y="400" font-size="10.5" class="ink2">On an ordinary SSD the cache cannot see units; writing its log in FIFO order comes close (page ③ §10.1).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 12. Segments, sized by the erase unit. ① What sets the size: the disk for LFS, the erase unit for a flash cache. ② A segment fills in DRAM, goes to one unit, and later dies whole, so the unit is erased with nothing to copy: <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#fig-writer">page ③ Figure 9</a> ②. ③ The limit is how many units can be filled at once. ④ Without a zoned drive, FIFO order is the nearest substitute.</p>
+  </div>
+  <p>① LFS chose its segment size from the disk (§3). Flash has no positioning, so the caches size their segments by the erase unit: FairyWREN makes each segment of its large-object cache exactly one unit, and Kangaroo fills one segment of its circular log in DRAM before writing it. ② Evicting such a segment kills every page of its unit at once, page ③'s u = 0 case, WA 1×. ③ §3's question, how much to buffer, returns as how many units can be open at once; FairyWREN fits in four, with the 64 slices of its small-object log sharing one. ④ On an ordinary SSD, writing the log in FIFO order comes close: CacheLib's DLWA fell from 1.5× to 1.05×. <span class="src">Kangaroo §4.2 · FairyWREN §4.3, §5.2 and §5.4 · Berg et al., CacheLib, OSDI 2020, §5.2</span></p>
+
+  <h3>12.3 · The imap, and the cache's index</h3>
+  <div class="figure" id="fig-find">
+    <div class="scroll">
+      <svg viewBox="0 0 760 408" width="760" role="img" aria-label="Top: at each layer, a place is either computed (UNIX inodes, direct mapping, sets) or looked up in a map that moves (the imap, the page map, a log cache index). Middle: the imap needs one entry per file, a cache index one per object. Bottom: Kangaroo indexes only its 5 percent log; Nemo keeps its index on flash and caches the hot part in DRAM">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Find by computing, or by looking up: the same choice at three layers</text>
+        <circle cx="24" cy="44" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="48" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="160" y="48" font-size="11.5" class="acc" font-weight="600">compute the place</text>
+        <text x="460" y="48" font-size="11.5" class="vio" font-weight="600">look it up in a map that moves</text>
+        <text x="16" y="76" font-size="11" class="ink" font-weight="600">file system</text>
+        <rect x="150" y="58" width="290" height="26" rx="4" class="accs"/>
+        <text x="160" y="75" font-size="10.5" class="ink">UNIX: inode n at a fixed address</text>
+        <rect x="450" y="58" width="294" height="26" rx="4" class="vios"/>
+        <text x="460" y="75" font-size="10.5" class="ink">LFS: the imap, inode → newest copy (§4)</text>
+        <text x="16" y="108" font-size="11" class="ink" font-weight="600">SSD</text>
+        <rect x="150" y="90" width="290" height="26" rx="4" class="accs"/>
+        <text x="160" y="107" font-size="10.5" class="ink">direct mapping (page ② §6)</text>
+        <rect x="450" y="90" width="294" height="26" rx="4" class="vios"/>
+        <text x="460" y="107" font-size="10.5" class="ink">the page map (page ② §7)</text>
+        <text x="16" y="140" font-size="11" class="ink" font-weight="600">flash cache</text>
+        <rect x="150" y="122" width="290" height="26" rx="4" class="accs"/>
+        <text x="160" y="139" font-size="10.5" class="ink">sets: hash(key) → set (page 3.5 §3)</text>
+        <rect x="450" y="122" width="294" height="26" rx="4" class="vios"/>
+        <text x="460" y="139" font-size="10.5" class="ink">a log: the DRAM index (page 3.5 §2)</text>
+        <text x="150" y="172" font-size="10" class="mut">nothing to store, but the place is fixed</text>
+        <text x="450" y="172" font-size="10" class="mut">the place changes on every write, so a map is kept</text>
+        <circle cx="24" cy="198" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="202" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="38" y="202" font-size="11.5" class="ink" font-weight="600">How many entries does the map need?</text>
+        <text x="38" y="222" font-size="10.5" class="ink">LFS imap: one per file</text>
+        <rect x="260" y="212" width="40" height="14" rx="2" class="vios"/>
+        <text x="308" y="223" font-size="10.5" class="mut">the whole imap stays cached in memory (§5)</text>
+        <text x="38" y="244" font-size="10.5" class="ink">cache index: one per object</text>
+        <rect x="260" y="234" width="420" height="14" rx="2" class="stps"/>
+        <text x="688" y="245" font-size="10.5" class="stp">billions</text>
+        <text x="260" y="266" font-size="10" class="mut">one per 100-byte object: page 3.5 §7’s DRAM bill</text>
+        <circle cx="24" cy="292" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="296" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="38" y="296" font-size="11.5" class="ink" font-weight="600">Two answers in the papers</text>
+        <rect x="16" y="306" width="356" height="92" rx="6" class="surf"/>
+        <text x="28" y="326" font-size="11.5" class="ink" font-weight="600">Kangaroo: index only the small log</text>
+        <rect x="28" y="336" width="17" height="22" rx="2" class="vios"/>
+        <rect x="45" y="336" width="315" height="22" rx="2" class="accs"/>
+        <text x="28" y="374" font-size="10" class="vio">5% indexed (KLog)</text>
+        <text x="150" y="374" font-size="10" class="acc">95% computed by hash (KSet)</text>
+        <text x="28" y="390" font-size="9.5" class="mono mut">Kangaroo §3</text>
+        <rect x="388" y="306" width="356" height="92" rx="6" class="surf"/>
+        <text x="400" y="326" font-size="11.5" class="ink" font-weight="600">Nemo: index on flash, hot part in DRAM</text>
+        <rect x="400" y="336" width="150" height="20" rx="3" class="vios"/>
+        <text x="408" y="350" font-size="9.5" class="vio">DRAM: hot filter groups</text>
+        <rect x="400" y="360" width="150" height="20" rx="3" class="ambs"/>
+        <text x="408" y="374" font-size="9.5" class="ink">flash: all filter groups</text>
+        <text x="562" y="350" font-size="10" class="ink">as LFS writes imap</text>
+        <text x="562" y="364" font-size="10" class="ink">pieces into its log and</text>
+        <text x="562" y="378" font-size="10" class="ink">caches them (§4, §5)</text>
+        <text x="400" y="392" font-size="9.5" class="mono mut">Nemo §4.1 and §4.3</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 13. The imap, and the cache’s index. ① Every layer either computes a place or looks it up in a map that changes on every write. ② LFS can keep its whole imap in memory because it has one entry per file; a cache needs one per object. ③ The papers’ two answers: index only a small part, or keep the index on flash and cache its hot part, as LFS does with the imap.</p>
+  </div>
+  <p>① Figure 4 showed two ways to find an inode: compute its address, as a classic UNIX file system does, or look it up in the imap, which moves with every write. The SSD made the same choice between direct mapping and a page map (<a href="2026-10-08-storage-2-flash-and-ftl.html#s6">page ② §6–§7</a>), and a flash cache makes it a third time: a set-associative cache hashes the key, a log-structured one keeps a DRAM index. ② LFS keeps its whole imap in memory because it needs one entry per file; a cache of billions of tiny objects needs one per object, <a href="2026-10-08-storage-3-5-flash-caches.html#s7">page 3.5 §7</a>'s DRAM bill. ③ Kangaroo indexes only its small log, about 5% of the capacity, and computes the place of everything else. Nemo writes its index, groups of Bloom filters, to flash and caches the frequently used groups in DRAM, as LFS writes imap pieces into its log and caches them. <span class="src">Kangaroo §2.3 and §3 · Nemo §4.1 and §4.3</span></p>
+
+  <h3>12.4 · Cleaning becomes eviction</h3>
+  <div class="figure" id="fig-evict">
+    <div class="scroll">
+      <svg viewBox="0 0 760 422" width="760" role="img" aria-label="One segment of six slots reclaimed three ways: a file system copies all four live slots, write amplification 3; a cache that drops the segment copies nothing, write amplification 1, but loses the popular object; a cache that copies only the popular object pays write amplification 1.2">
+        <defs><marker id="h12b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">The oldest segment must be reclaimed. Its six slots: one popular object, three other live ones, two dead</text>
+        <rect x="16" y="32" width="12" height="12" class="vios"/>
+        <text x="33" y="42" font-size="10.5" class="ink2">live, read often (hot)</text>
+        <rect x="170" y="32" width="12" height="12" class="ambs"/>
+        <text x="187" y="42" font-size="10.5" class="ink2">live, rarely read</text>
+        <rect x="300" y="32" width="12" height="12" class="stps"/>
+        <text x="317" y="42" font-size="10.5" class="ink2">dead</text>
+        <rect x="16" y="62" width="728" height="84" rx="6" class="surf"/>
+        <text x="28" y="84" font-size="12" class="ink" font-weight="600">a. a file system or a key-value store</text>
+        <text x="28" y="101" font-size="11" class="mut">must keep every live block (§7)</text>
+        <rect x="300" y="70" width="28" height="26" class="vios"/>
+        <text x="314" y="110" font-size="11" class="vio" text-anchor="middle" font-weight="600">↓</text>
+        <rect x="330" y="70" width="28" height="26" class="ambs"/>
+        <text x="344" y="110" font-size="11" class="vio" text-anchor="middle" font-weight="600">↓</text>
+        <rect x="360" y="70" width="28" height="26" class="stps"/>
+        <rect x="390" y="70" width="28" height="26" class="ambs"/>
+        <text x="404" y="110" font-size="11" class="vio" text-anchor="middle" font-weight="600">↓</text>
+        <rect x="420" y="70" width="28" height="26" class="ambs"/>
+        <text x="434" y="110" font-size="11" class="vio" text-anchor="middle" font-weight="600">↓</text>
+        <rect x="450" y="70" width="28" height="26" class="stps"/>
+        <text x="300" y="124" font-size="10" class="mono vio">copied: 4</text>
+        <path d="M486 83 H504" class="arr" marker-end="url(#h12b)"/>
+        <text x="512" y="84" font-size="11.5" class="ink" font-weight="600">copies 4 of 6: u = 2/3, WA = 3</text>
+        <text x="512" y="101" font-size="11" class="ink2">nothing is lost (Figure 7’s number)</text>
+        <text x="28" y="139" font-size="10" class="mut">papers: Netflix ran RocksDB as a flash cache and had to overprovision by 67% (Kangaroo §2.3)</text>
+        <rect x="16" y="160" width="728" height="84" rx="6" class="surf"/>
+        <text x="28" y="182" font-size="12" class="ink" font-weight="600">b. a cache that drops the whole segment</text>
+        <text x="28" y="199" font-size="11" class="mut">FIFO eviction, nothing copied</text>
+        <rect x="300" y="168" width="28" height="26" class="vios"/>
+        <rect x="330" y="168" width="28" height="26" class="ambs"/>
+        <rect x="360" y="168" width="28" height="26" class="stps"/>
+        <rect x="390" y="168" width="28" height="26" class="ambs"/>
+        <rect x="420" y="168" width="28" height="26" class="ambs"/>
+        <rect x="450" y="168" width="28" height="26" class="stps"/>
+        <text x="300" y="222" font-size="10" class="mono mut">copied: 0</text>
+        <path d="M486 181 H504" class="arr" marker-end="url(#h12b)"/>
+        <text x="512" y="182" font-size="11.5" class="stp" font-weight="600">copies 0: WA = 1</text>
+        <text x="512" y="199" font-size="11" class="ink2">lost: four live objects, the hot one too</text>
+        <text x="28" y="237" font-size="10" class="mut">papers: FairyWREN’s large-object log: one segment = one erase unit, WA 1× · CacheLib’s large-object cache, FIFO</text>
+        <rect x="16" y="258" width="728" height="84" rx="6" class="surf"/>
+        <text x="28" y="280" font-size="12" class="ink" font-weight="600">c. a cache that keeps only what was read</text>
+        <text x="28" y="297" font-size="11" class="mut">re-admits the hot objects</text>
+        <rect x="300" y="266" width="28" height="26" class="vios"/>
+        <text x="314" y="306" font-size="11" class="vio" text-anchor="middle" font-weight="600">↓</text>
+        <rect x="330" y="266" width="28" height="26" class="ambs"/>
+        <rect x="360" y="266" width="28" height="26" class="stps"/>
+        <rect x="390" y="266" width="28" height="26" class="ambs"/>
+        <rect x="420" y="266" width="28" height="26" class="ambs"/>
+        <rect x="450" y="266" width="28" height="26" class="stps"/>
+        <text x="300" y="320" font-size="10" class="mono vio">copied: 1</text>
+        <path d="M486 279 H504" class="arr" marker-end="url(#h12b)"/>
+        <text x="512" y="280" font-size="11.5" class="vio" font-weight="600">copies 1 of 6: WA = 1/(1 − 1/6) = 1.2</text>
+        <text x="512" y="297" font-size="11" class="ink2">lost: three objects rarely read</text>
+        <text x="28" y="335" font-size="10" class="mut">papers: Kangaroo re-admits objects read while in its log · Nemo writes hot objects back · Flashield calls these copies CLWA</text>
+        <rect x="16" y="358" width="728" height="50" rx="6" class="vios"/>
+        <text x="28" y="378" font-size="12.5" class="vio" font-weight="600">In LFS the workload sets u. In a cache, u is a choice:</text>
+        <text x="28" y="397" font-size="12" class="ink">every live object copied costs a write, and every one dropped may cost a miss.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 14. Cleaning becomes eviction. The same segment, reclaimed by a file system (a) and by two kinds of cache (b, c); the arrows mark what is copied. WA counts writes per new object stored, as in page ③ §3: in (c), each freed segment takes five new objects for six writes. The grey line under each row names the papers that work that way.</p>
+  </div>
+  <p>A file system may not lose data, so §7's cleaner must copy every live block. A cache may: "since Kangaroo is a cache, not a key-value store, it is free to drop objects". Figure 14 reclaims one segment three ways: (a) copying every live object costs WA 3 at u = 2/3, Figure 7's number; (b) dropping the segment costs no copies but loses the popular object; (c) copying only what was read keeps it for WA 1.2. In LFS the workload sets u; in a cache u becomes a choice, traded against the miss ratio, and Flashield names the cost of the copies cache-level write amplification, CLWA. <span class="src">Kangaroo §1 · Flashield, NSDI 2019, §1 and §2.2</span></p>
+  <p>The papers sit at (b) and (c). FairyWREN's large-object log and CacheLib's large-object cache drop whole segments; Kangaroo re-admits objects read during their stay in its log, and Nemo writes hot objects back before it evicts a set-group. Where a unit holds carefully gathered sets, they copy everything live instead, since dropping a set raises the miss ratio. A key-value store must sit at (a), which is why Netflix's RocksDB flash cache needed 67% overprovisioning. <span class="src">Kangaroo §2.3 and §4.3 · Nemo §3.1 and §4.2 · FairyWREN §5.2 and §5.3</span></p>
+
+  <h3>12.5 · Liveness: the same rule a third time</h3>
+  <div class="figure" id="fig-maprule">
+    <div class="scroll">
+      <svg viewBox="0 0 760 330" width="760" role="img" aria-label="Three rows, LFS, the FTL and a flash cache. In each, a map entry points at the newest copy, which is live; an older copy that nothing points at is dead. LFS and the FTL keep a note on each copy to find its map entry; the cache needs none because its map is in DRAM">
+        <defs><marker id="h12l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">A stored copy is live exactly when the map still points at it</text>
+        <text x="16" y="66" font-size="11.5" class="ink" font-weight="600">LFS (§8)</text>
+        <rect x="150" y="46" width="220" height="30" rx="4" class="vios"/>
+        <text x="160" y="66" font-size="10.5" class="mono ink">inode 7: block 3 → seg 9</text>
+        <path d="M370 61 H406" class="arr-a" marker-end="url(#h12l)"/>
+        <rect x="410" y="42" width="164" height="38" rx="4" class="ambs"/>
+        <text x="420" y="58" font-size="10.5" class="ink" font-weight="600">copy at seg 9</text>
+        <text x="420" y="73" font-size="9.5" class="acc">live: the map points here</text>
+        <rect x="584" y="42" width="160" height="38" rx="4" class="stps"/>
+        <text x="594" y="58" font-size="10.5" class="stp" font-weight="600">old copy at seg 2</text>
+        <text x="594" y="73" font-size="9.5" class="stp">dead: nothing points here</text>
+        <text x="160" y="94" font-size="10" class="mut">note on the copy: the summary says (inode 7, block 3)</text>
+        <text x="16" y="140" font-size="11.5" class="ink" font-weight="600">FTL (page ③ §2)</text>
+        <rect x="150" y="120" width="220" height="30" rx="4" class="vios"/>
+        <text x="160" y="140" font-size="10.5" class="mono ink">page map: page 12 → P41</text>
+        <path d="M370 135 H406" class="arr-a" marker-end="url(#h12l)"/>
+        <rect x="410" y="116" width="164" height="38" rx="4" class="ambs"/>
+        <text x="420" y="132" font-size="10.5" class="ink" font-weight="600">copy at P41</text>
+        <text x="420" y="147" font-size="9.5" class="acc">live: the map points here</text>
+        <rect x="584" y="116" width="160" height="38" rx="4" class="stps"/>
+        <text x="594" y="132" font-size="10.5" class="stp" font-weight="600">old copy at P17</text>
+        <text x="594" y="147" font-size="9.5" class="stp">dead: nothing points here</text>
+        <text x="160" y="168" font-size="10" class="mut">note on the copy: its OOB note says page 12</text>
+        <text x="16" y="214" font-size="11.5" class="ink" font-weight="600">flash cache</text>
+        <rect x="150" y="194" width="220" height="30" rx="4" class="vios"/>
+        <text x="160" y="214" font-size="10.5" class="mono ink">DRAM index: key k → seg 3</text>
+        <path d="M370 209 H406" class="arr-a" marker-end="url(#h12l)"/>
+        <rect x="410" y="190" width="164" height="38" rx="4" class="ambs"/>
+        <text x="420" y="206" font-size="10.5" class="ink" font-weight="600">copy at seg 3</text>
+        <text x="420" y="221" font-size="9.5" class="acc">live: the map points here</text>
+        <rect x="584" y="190" width="160" height="38" rx="4" class="stps"/>
+        <text x="594" y="206" font-size="10.5" class="stp" font-weight="600">old copy at seg 1</text>
+        <text x="594" y="221" font-size="9.5" class="stp">dead: nothing points here</text>
+        <text x="160" y="242" font-size="10" class="mut">note on the copy: none, the index is in DRAM</text>
+        <rect x="16" y="262" width="728" height="56" rx="6" class="surf"/>
+        <text x="28" y="282" font-size="11" class="ink" font-weight="600">GC asks one question of each copy: does the map still point here? Yes: live, copy it. No: dead, skip it.</text>
+        <text x="28" y="302" font-size="10.5" class="ink2">LFS and the FTL keep a note on the copy to find its map entry. A cache drops the note: its map is in DRAM, always at hand.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 15. Liveness, the same rule a third time. In each row the map points at the new copy, so it is live, and nothing points at the old one, so it is dead. The note on the copy (LFS’s segment summary, the FTL’s OOB area) only tells the collector which map entry to ask; the cache asks its DRAM index directly. Addresses are made up for the drawing.</p>
+  </div>
+  <p>§8 read the segment summary to learn which inode and block a copy held, then asked that inode whether it still pointed there; <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s2">page ③ §2</a> did the same with the OOB note and the page map. In both, a copy is live exactly when the map still points at it. The caches keep the rule and drop the note, since their map is in DRAM: each entry of Kangaroo's log index carries a valid bit, and FairyWREN's set store keeps an in-memory index of where each set lies, so its GC rewrites the sets that index still points at. <span class="src">Kangaroo §4.2 · FairyWREN §5.3</span></p>
+
+  <h3>12.6 · Hot and cold, decided when writing</h3>
+  <div class="figure" id="fig-split">
+    <div class="scroll">
+      <svg viewBox="0 0 760 342" width="760" role="img" aria-label="Top: LFS separates hot from cold when cleaning; FairyWREN separates them when writing, splitting each 8 KB set into a hot 4 KB subset of unpopular objects, rewritten on every insert, and a cold 4 KB subset of popular objects, rewritten every fifth insert. Bottom: over five inserts, one set writes 40 KB, two subsets write 24 KB">
+        <defs><marker id="h12h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Hot and cold, split when writing: one set becomes two subsets in two logs</text>
+        <circle cx="24" cy="44" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="48" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="38" y="48" font-size="11.5" class="ink" font-weight="600">When is hot separated from cold?</text>
+        <rect x="16" y="58" width="300" height="120" rx="6" class="surf"/>
+        <text x="28" y="78" font-size="11.5" class="ink" font-weight="600">LFS (§9): when cleaning</text>
+        <text x="28" y="96" font-size="10.5" class="ink2">wait on hot segments, which empty</text>
+        <text x="28" y="112" font-size="10.5" class="ink2">themselves; clean cold ones sooner</text>
+        <rect x="332" y="58" width="412" height="120" rx="6" class="surf"/>
+        <text x="344" y="78" font-size="11.5" class="ink" font-weight="600">FairyWREN: when writing (§5.4)</text>
+        <text x="344" y="98" font-size="10" class="mut">objects from the small-object log</text>
+        <path d="M430 104 V118" class="arr" marker-end="url(#h12h)"/>
+        <rect x="344" y="122" width="190" height="32" rx="4" class="stps"/>
+        <text x="352" y="136" font-size="10.5" class="stp" font-weight="600">hot subset, 4 KB</text>
+        <text x="352" y="149" font-size="9" class="ink">unpopular: rewritten each insert</text>
+        <rect x="544" y="122" width="190" height="32" rx="4" class="accs"/>
+        <text x="552" y="136" font-size="10.5" class="acc" font-weight="600">cold subset, 4 KB</text>
+        <text x="552" y="149" font-size="9" class="ink">popular: rewritten every 5th</text>
+        <text x="344" y="170" font-size="10" class="mut">two logs; every 5th rewrite, both are merged and split again</text>
+        <circle cx="24" cy="204" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="208" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="38" y="208" font-size="11.5" class="ink" font-weight="600">Writes to one set over five inserts (n = 5, 8 KB sets)</text>
+        <text x="38" y="236" font-size="10.5" class="ink">one 8 KB set</text>
+        <rect x="170" y="222" width="48" height="22" rx="2" class="stps"/>
+        <text x="194" y="237" font-size="10" class="ink" text-anchor="middle">8</text>
+        <rect x="224" y="222" width="48" height="22" rx="2" class="stps"/>
+        <text x="248" y="237" font-size="10" class="ink" text-anchor="middle">8</text>
+        <rect x="278" y="222" width="48" height="22" rx="2" class="stps"/>
+        <text x="302" y="237" font-size="10" class="ink" text-anchor="middle">8</text>
+        <rect x="332" y="222" width="48" height="22" rx="2" class="stps"/>
+        <text x="356" y="237" font-size="10" class="ink" text-anchor="middle">8</text>
+        <rect x="386" y="222" width="48" height="22" rx="2" class="stps"/>
+        <text x="410" y="237" font-size="10" class="ink" text-anchor="middle">8</text>
+        <text x="448" y="238" font-size="11" class="stp" font-weight="600">= 40 KB</text>
+        <text x="38" y="272" font-size="10.5" class="ink">two 4 KB subsets</text>
+        <rect x="170" y="258" width="24" height="22" rx="2" class="stps"/>
+        <text x="182" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <rect x="200" y="258" width="24" height="22" rx="2" class="stps"/>
+        <text x="212" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <rect x="230" y="258" width="24" height="22" rx="2" class="stps"/>
+        <text x="242" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <rect x="260" y="258" width="24" height="22" rx="2" class="stps"/>
+        <text x="272" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <rect x="290" y="258" width="24" height="22" rx="2" class="stps"/>
+        <text x="302" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <rect x="314" y="258" width="24" height="22" rx="2" class="accs"/>
+        <text x="326" y="273" font-size="10" class="ink" text-anchor="middle">4</text>
+        <text x="346" y="274" font-size="11" class="acc" font-weight="600">= 24 KB, 40% fewer</text>
+        <text x="170" y="298" font-size="10" class="mut">red: the hot subset, written on every insert · teal: the cold subset, merged and split again every fifth</text>
+        <circle cx="24" cy="324" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="328" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="38" y="328" font-size="10.5" class="ink2">The paper calls the unpopular subset hot, in LFS’s sense: its objects are the likeliest to be evicted, so it is written most.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 16. Hot and cold, decided when writing. ① LFS waits until cleaning to tell hot from cold; FairyWREN splits each set when writing, into two subsets in two logs. ② The arithmetic is FairyWREN’s: 8 KB on every insert, against 4 KB on every insert plus 4 KB every fifth. ③ The naming follows LFS: hot means often written.</p>
+  </div>
+  <p>① §9's LFS told hot from cold when cleaning; FairyWREN does it when writing. Each set is split into a subset for popular objects and one for unpopular objects, each in its own log; new objects from the small-object log go into the unpopular subset, and every n rewrites both are read, merged and split again by popularity. ② With n = 5 and 8 KB sets, a set's writes over five inserts fall from 40 KB to 24 KB, a 40% cut. ③ The paper calls the unpopular subset hot in LFS's sense: its objects are the likeliest to be evicted, so it is rewritten most. This is grouping by death time (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10.1</a>), done by the cache. <span class="src">FairyWREN §5.4</span></p>
+
+  <h3>12.7 · A log on a log</h3>
+  <div class="figure" id="fig-twolayer">
+    <div class="scroll">
+      <svg viewBox="0 0 760 352" width="760" role="img" aria-label="Top: the cache above, the SSD flash translation layer below. In the worst case the drive copies set S during its garbage collection and the cache then rewrites S to admit new objects, so the copy dies at once: two writes where one would do. Bottom: fix a, a log written in order; fix b, a zoned drive lets the cache reclaim, and nest packing folds the new objects into the rewrite">
+        <defs><marker id="h12w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Two layers that both reclaim: the drive may copy what the cache is about to replace</text>
+        <circle cx="24" cy="44" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="48" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="38" y="48" font-size="11.5" class="ink" font-weight="600">The worst case, on an ordinary SSD (FairyWREN §5.3)</text>
+        <rect x="16" y="58" width="728" height="40" rx="4" class="vios"/>
+        <text x="28" y="82" font-size="11" class="vio" font-weight="600">the cache</text>
+        <rect x="196" y="66" width="56" height="24" rx="3" class="ambs"/>
+        <text x="224" y="82" font-size="10" class="ink" text-anchor="middle" font-weight="600">set S</text>
+        <rect x="440" y="66" width="140" height="24" rx="3" class="ambs"/>
+        <text x="510" y="82" font-size="10" class="ink" text-anchor="middle" font-weight="600">S + new objects</text>
+        <rect x="16" y="110" width="728" height="40" rx="4" class="accs"/>
+        <text x="28" y="134" font-size="11" class="acc" font-weight="600">the SSD’s FTL, a log</text>
+        <rect x="196" y="118" width="56" height="24" rx="3" class="ambs"/>
+        <text x="224" y="134" font-size="10" class="ink" text-anchor="middle" font-weight="600">S</text>
+        <path d="M252 130 H290" class="arr" marker-end="url(#h12w)"/>
+        <rect x="292" y="118" width="84" height="24" rx="3" class="stps"/>
+        <text x="334" y="134" font-size="10" class="ink" text-anchor="middle">S, copied</text>
+        <path d="M510 90 V116" class="arr" marker-end="url(#h12w)"/>
+        <rect x="440" y="118" width="140" height="24" rx="3" class="ambs"/>
+        <text x="510" y="134" font-size="10" class="ink" text-anchor="middle">S + new, written</text>
+        <text x="196" y="166" font-size="10" class="stp">write 1: the drive’s GC copies S</text>
+        <text x="440" y="166" font-size="10" class="stp">write 2: the cache rewrites S; the copy dies</text>
+        <text x="38" y="188" font-size="11" class="stp" font-weight="600">Two writes where one would do, and an ordinary SSD cannot merge them.</text>
+        <circle cx="24" cy="214" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="218" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="38" y="218" font-size="11.5" class="ink" font-weight="600">The papers’ two fixes</text>
+        <rect x="16" y="228" width="356" height="112" rx="6" class="accs"/>
+        <text x="28" y="248" font-size="11.5" class="acc" font-weight="600">a. a log: write it in order</text>
+        <text x="28" y="268" font-size="10.5" class="ink2">The cache writes its log FIFO, so the drive’s</text>
+        <text x="28" y="284" font-size="10.5" class="ink2">blocks fill and die in order and its GC has</text>
+        <text x="28" y="300" font-size="10.5" class="ink2">little to copy. CacheLib: DLWA 1.5× → 1.05×</text>
+        <text x="28" y="316" font-size="10.5" class="ink2">(page ③ §10.1, CacheLib §5.2).</text>
+        <rect x="388" y="228" width="356" height="112" rx="6" class="accs"/>
+        <text x="400" y="248" font-size="11.5" class="acc" font-weight="600">b. sets: let one layer reclaim</text>
+        <text x="400" y="268" font-size="10.5" class="ink2">A ZNS or FDP drive hands the erase to the cache.</text>
+        <text x="400" y="284" font-size="10.5" class="ink2">Alone, that “just moves the GC from the device to</text>
+        <text x="400" y="300" font-size="10.5" class="ink2">the cache” (§4.4). Nest packing makes the GC’s</text>
+        <text x="400" y="316" font-size="10.5" class="ink2">rewrite of S admit the new objects too: one write.</text>
+        <text x="400" y="334" font-size="9.5" class="mono mut">FairyWREN §4.4, §5.3 · page 3.5 §8.2</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 17. Two layers that both reclaim. ① On an ordinary SSD, the drive’s GC can copy a set just before the cache rewrites it, so the copy dies at once; the drive cannot know what the cache is about to replace, as with an untrimmed delete (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">page ③ §4</a>). ② Fix a lines the layers up; fix b leaves one layer to reclaim for both, and pays off only when the cache folds its own writes into that GC.</p>
+  </div>
+  <p>① Figure 11 stacks a cache on an SSD whose FTL is itself a log, and each layer reclaims on its own. FairyWREN gives the worst case: the drive's garbage collection copies a set, and the cache then rewrites that set at once to admit new objects, so the copy dies; on an ordinary SSD the two writes cannot be merged. The drive cannot know what the cache is about to replace, as with the untrimmed delete of <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">page ③ §4</a>. ② A cache that writes its log in order lets the drive's blocks die in order, as CacheLib's FIFO does (12.2). For sets, a ZNS or FDP drive hands the erase to the cache, but that alone "just moves the GC from the device to the cache"; FairyWREN gains by folding its own writes into that GC, nest packing (<a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8.2</a>). <span class="src">FairyWREN §4.4 and §5.3 · CacheLib §5.2 · tree node 1.3.3</span></p>
+
+  <h3>12.8 · Crashes: what a cache may forget</h3>
+  <div class="figure" id="fig-restart">
+    <div class="scroll">
+      <svg viewBox="0 0 760 322" width="760" role="img" aria-label="Four lanes. LFS after a crash reads its newest consistent checkpoint and rolls forward until all data is back. A cache restarted cold begins empty and its hit ratio climbs back slowly, over several days for a large cache. A cache restarted warm after a planned shutdown keeps its map in shared memory and on flash for the next process. KVell, a store, rescans every slab to rebuild its index, which takes minutes">
+        <defs><marker id="h12r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">After a crash: a file system must recover; a cache may forget, at a price</text>
+        <text x="16" y="62" font-size="11" class="ink" font-weight="600">① LFS</text>
+        <rect x="168" y="44" width="64" height="28" rx="4" class="stps"/>
+        <text x="200" y="62" font-size="10" class="ink" text-anchor="middle">crash</text>
+        <path d="M234 58 H246" class="arr" marker-end="url(#h12r)"/>
+        <rect x="248" y="44" width="181" height="28" rx="4" class="surf"/>
+        <text x="339" y="62" font-size="10" class="ink" text-anchor="middle">newest consistent checkpoint</text>
+        <path d="M431 58 H443" class="arr" marker-end="url(#h12r)"/>
+        <rect x="445" y="44" width="87" height="28" rx="4" class="surf"/>
+        <text x="489" y="62" font-size="10" class="ink" text-anchor="middle">roll forward</text>
+        <path d="M534 58 H546" class="arr" marker-end="url(#h12r)"/>
+        <rect x="548" y="44" width="93" height="28" rx="4" class="accs"/>
+        <text x="594" y="62" font-size="10" class="ink" text-anchor="middle">all data back</text>
+        <text x="16" y="118" font-size="11" class="ink" font-weight="600">② cache, cold restart</text>
+        <rect x="168" y="100" width="64" height="28" rx="4" class="stps"/>
+        <text x="200" y="118" font-size="10" class="ink" text-anchor="middle">restart</text>
+        <path d="M234 114 H246" class="arr" marker-end="url(#h12r)"/>
+        <rect x="248" y="100" width="81" height="28" rx="4" class="surf"/>
+        <text x="288" y="118" font-size="10" class="ink" text-anchor="middle">empty cache</text>
+        <path d="M353 128 C 413 128, 443 102, 553 100" style="fill:none;stroke:var(--amber);stroke-width:2"/>
+        <text x="353" y="144" font-size="10" class="amb">hit ratio climbs back slowly; a large cache can take several days</text>
+        <text x="16" y="174" font-size="11" class="ink" font-weight="600">③ cache, warm restart</text>
+        <rect x="168" y="156" width="110" height="28" rx="4" class="surf"/>
+        <text x="223" y="174" font-size="10" class="ink" text-anchor="middle">planned shutdown</text>
+        <path d="M280 170 H292" class="arr" marker-end="url(#h12r)"/>
+        <rect x="294" y="156" width="158" height="28" rx="4" class="vios"/>
+        <text x="373" y="174" font-size="10" class="ink" text-anchor="middle">map kept: memory + flash</text>
+        <path d="M454 170 H466" class="arr" marker-end="url(#h12r)"/>
+        <rect x="468" y="156" width="140" height="28" rx="4" class="surf"/>
+        <text x="538" y="174" font-size="10" class="ink" text-anchor="middle">next process loads it</text>
+        <path d="M610 170 H622" class="arr" marker-end="url(#h12r)"/>
+        <rect x="624" y="156" width="87" height="28" rx="4" class="accs"/>
+        <text x="667" y="174" font-size="10" class="ink" text-anchor="middle">warm at once</text>
+        <text x="16" y="230" font-size="11" class="ink" font-weight="600">④ KVell, a store</text>
+        <rect x="168" y="212" width="64" height="28" rx="4" class="stps"/>
+        <text x="200" y="230" font-size="10" class="ink" text-anchor="middle">crash</text>
+        <path d="M234 226 H246" class="arr" marker-end="url(#h12r)"/>
+        <rect x="248" y="212" width="116" height="28" rx="4" class="surf"/>
+        <text x="306" y="230" font-size="10" class="ink" text-anchor="middle">rescan every slab</text>
+        <path d="M366 226 H378" class="arr" marker-end="url(#h12r)"/>
+        <rect x="380" y="212" width="146" height="28" rx="4" class="accs"/>
+        <text x="453" y="230" font-size="10" class="ink" text-anchor="middle">index rebuilt: minutes</text>
+        <text x="16" y="270" font-size="9.5" class="mono mut">Lane ①: this page §5, §10. Lanes ②–③: CacheLib §3.7, §4.3, §5.2. Lane ④: KVell, SOSP 2019, §5.6.</text>
+        <rect x="16" y="280" width="728" height="30" rx="6" class="surf"/>
+        <text x="28" y="300" font-size="10.5" class="ink">Restarts are routine: 75% of CacheLib’s lookaside caches and 95% of its CDN caches restart within seven days, for code fixes.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 18. Crashes: what a cache may forget. ① A file system must find all its data again. ② A cache may start empty, at the price of warm-up. ③ CacheLib’s warm restart keeps the map across a planned restart, as LFS’s checkpoint keeps it across a crash. ④ A store without a commit log pays at recovery instead. The step boxes are a sketch; the numbers are quoted.</p>
+  </div>
+  <p>① A file system must find its data after a crash, so LFS reads its newest consistent checkpoint and rolls forward (§5, §10). ② A cache may forget and restart empty, but its hit ratio climbs back slowly, and a large hybrid cache can take several days to warm up. Restarts are routine: 75% of CacheLib's lookaside caches and 95% of its CDN caches restart within seven days, to pick up code fixes. ③ CacheLib's warm restart keeps the map instead, as LFS's checkpoint does: on a planned shutdown the DRAM cache's state stays in shared memory, and the flash cache's index and Bloom filters are written to flash for the next process. ④ KVell, a store rather than a cache, keeps no commit log; after a crash it rescans all its slabs to rebuild its in-memory index, which can take minutes. <span class="src">CacheLib §3.7, §4.3 and §5.2 · KVell, SOSP 2019, §5.6</span></p>
+
+  <p class="gist ks"><span class="lbl">CARRY</span>A log-structured flash cache is LFS a third time: segments sized by the erase unit, a DRAM index in the imap's place, eviction in the cleaner's. Its one new freedom, dropping live data, turns u from a property of the workload into a choice traded against misses. Liveness keeps the map rule; hot and cold go to separate logs; and stacked on an SSD, the two logs must be lined up (write in order) or merged (the cache does the GC).</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>What this page settled</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>IMPORTANCE</th><th>CLAIM</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td class="c">main</td><td>Caches absorb reads, so LFS makes writes fast: buffer every update and write it sequentially; never overwrite in place.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">main</td><td>Order alone is not enough; LFS writes whole segments of a few MB.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">★ core</td><td>D = F/(1−F) × R<sub>peak</sub> × T<sub>position</sub>: 9 MB for 90% at 10 ms and 100 MB/s.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">★ core</td><td>The imap maps inode number → newest inode address, and its pieces ride in the same segment.</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td class="c">★ core</td><td>CR (fixed, every ~30 s) → imap (cached) → inode → data; reads cost what they cost in FFS.</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td class="c">main</td><td>Directories hold inode numbers, so a moved inode changes only the imap: no recursive update.</td><td class="c"><a href="#s6">§6</a></td></tr>
+        <tr><td class="c">main</td><td>The cleaner compacts M segments into N &lt; M; its cost is page ③'s 1/(1−u).</td><td class="c"><a href="#s7">§7</a></td></tr>
+        <tr><td class="c">main</td><td>Liveness via the segment summary (inode, offset) and the inode's pointer; version numbers short-cut it.</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td class="c">skim</td><td>Clean cold segments sooner, hot ones later.</td><td class="c"><a href="#s9">§9</a></td></tr>
+        <tr><td class="c">main</td><td>Two CRs with timestamps at both ends; roll forward from the newest consistent one.</td><td class="c"><a href="#s10">§10</a></td></tr>
+        <tr><td class="c">★ core</td><td>LFS and the FTL are one design at two layers, with the same costs.</td><td class="c"><a href="#s11">§11</a></td></tr>
+        <tr><td class="c">★ core</td><td>The papers' log-structured caches are the third layer: segments sized by the erase unit, a DRAM index for the imap, eviction for the cleaner. A cache may drop live data, so u becomes a choice traded against misses.</td><td class="c"><a href="#s12">§12</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ostep43">
+  <div class="sec-head"><h2>OSTEP 43, section by section</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>OSTEP 43</th><th>WHAT IT IS</th><th>COVERED IN</th></tr></thead>
+      <tbody>
+        <tr><td><b>Introduction</b></td><td>The four observations; the crux</td><td><a href="#s1">§1</a></td></tr>
+        <tr><td><b>43.1–43.2</b></td><td>Writing sequentially; write buffering and segments</td><td><a href="#s2">§2</a></td></tr>
+        <tr><td><b>43.3</b></td><td>How much to buffer</td><td><a href="#s3">§3</a></td></tr>
+        <tr><td><b>43.4–43.5</b></td><td>Finding inodes; the inode map</td><td><a href="#s4">§4</a></td></tr>
+        <tr><td><b>43.6–43.7</b></td><td>The checkpoint region; reading a file</td><td><a href="#s5">§5</a></td></tr>
+        <tr><td><b>43.8</b></td><td>Directories; the recursive update problem</td><td><a href="#s6">§6</a></td></tr>
+        <tr><td><b>43.9</b></td><td>Garbage collection (cleaning)</td><td><a href="#s7">§7</a></td></tr>
+        <tr><td><b>43.10</b></td><td>Determining block liveness</td><td><a href="#s8">§8</a></td></tr>
+        <tr><td><b>43.11</b></td><td>Which blocks to clean, and when</td><td><a href="#s9">§9</a></td></tr>
+        <tr><td><b>43.12</b></td><td>Crash recovery and the log</td><td><a href="#s10">§10</a></td></tr>
+        <tr><td><b>43.13</b></td><td>Summary; WAFL, ZFS, btrfs, SSDs</td><td><a href="#s11">§11</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="series">
+  <div class="sec-head"><h2>The pages</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAGE</th><th>IMPORTANCE</th><th>QUESTION IT ANSWERS</th><th>STANDS IN FOR</th></tr></thead>
+      <tbody>
+        <tr><td><a href="2026-10-08-storage-1-hard-disk-rebuilt.html"><b>① The hard disk</b></a></td><td class="c">main</td><td>Why is random access slow, and what is the OS promised?</td><td>OSTEP 37.1–37.4</td></tr>
+        <tr><td><a href="2026-10-08-storage-2-flash-and-ftl.html"><b>② Flash and the FTL</b></a></td><td class="c">★ core</td><td>What can a flash chip not do, and how does the SSD still look like a disk?</td><td>OSTEP 44.1–44.7</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-garbage-and-write-amplification.html"><b>③ Garbage and write amplification</b></a></td><td class="c">★ core</td><td>What does never overwriting cost, and how is the cost kept down?</td><td>OSTEP 44.8–44.12</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-5-flash-caches.html"><b>3.5 Flash caches</b></a></td><td class="c">★ core</td><td>How does a cache find a tiny object on flash, and why does that cost DRAM?</td><td>the papers' background sections</td></tr>
+        <tr><td><b>④ The log-structured file system</b> (here)</td><td class="c">main</td><td>How does a file system write only sequentially, and still find its data?</td><td>OSTEP 43</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="legend">
+  <div class="sec-head"><h2>Terms and figure marks</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>TERM OR MARK</th><th>MEANING</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Segment</b></td><td>The large chunk (a few MB) LFS buffers in memory and writes in one sequential transfer.</td><td class="c"><a href="#fig-segment">F2</a></td></tr>
+        <tr><td><b>T<sub>position</sub> · R<sub>peak</sub> · F · D</b></td><td>Positioning time per write; peak transfer rate; target fraction of the peak; data buffered per write.</td><td class="c"><a href="#fig-buffer">F3</a></td></tr>
+        <tr><td><b>Inode · I[k] · b[i]</b></td><td>The per-file record of metadata and block pointers; the inode of file k; its pointer to block i.</td><td class="c"><a href="#fig-imap">F4</a></td></tr>
+        <tr><td><b>imap · m[k]</b></td><td>The inode map, inode number → address of the newest inode; its entry for inode k.</td><td class="c"><a href="#fig-imap">F4</a> <a href="#fig-cr">F5</a></td></tr>
+        <tr><td><b>CR</b></td><td>Checkpoint region: the fixed place that points to the imap pieces; there are two, one at each end of the disk.</td><td class="c"><a href="#fig-cr">F5</a> <a href="#fig-crash">F10</a></td></tr>
+        <tr><td><b>SS</b></td><td>Segment summary block: per block of the segment, its inode number and offset.</td><td class="c"><a href="#fig-live">F8</a></td></tr>
+        <tr><td><b>A0, A1, …</b></td><td>Disk addresses of blocks in the log.</td><td class="c">all</td></tr>
+        <tr><td><b>Erase unit (EU) · active EU</b></td><td>The papers' word for an erase block; an EU still being filled, which the drive must buffer, so only a few may be open.</td><td class="c"><a href="#s12">§12.2</a></td></tr>
+        <tr><td><b>ZNS · FDP</b></td><td>Drive interfaces that let the host choose where data goes and when erase units are erased; FairyWREN calls the class WREN.</td><td class="c"><a href="#s12">§12.2</a> <a href="#s12">§12.7</a></td></tr>
+        <tr><td><b>Set-associative cache</b></td><td>A cache that hashes each key to one fixed set (a 4 KB page) instead of indexing it, the computed address of Figure 4.</td><td class="c"><a href="#s12">§12.3</a></td></tr>
+        <tr><td><b>ALWA · DLWA · CLWA</b></td><td>Write amplification by the application, by the drive, and by a cache rewriting objects it wants to keep (Flashield's term). ALWA and DLWA: <a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8.1</a>; CLWA: §12.4.</td><td class="c"><a href="#fig-evict">F14</a></td></tr>
+        <tr><td><b>Figure 14 cells</b></td><td>Violet = live and read often; amber = live, rarely read; red = dead; ↓ = copied.</td><td class="c"><a href="#fig-evict">F14</a></td></tr>
+        <tr><td><b>Colors</b></td><td>Amber = data block (or live block); teal = inode; violet = imap piece; red and struck = garbage.</td><td class="c">all</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>Leaves out · assumes</h2></div>
+  <p><b>Leaves out.</b> The cost-benefit cleaning policy of the original LFS paper and later adaptive policies (Matthews et al., 1997). The segment usage table and other bookkeeping in Rosenblum's dissertation. The lfs.py simulator homework. In §12, each paper's full design: only the parts that line up with LFS are taken, and the tree nodes go deeper.</p>
+  <p><b>Assumes.</b> Inodes, direct and indirect pointers, and directories as (name, inode number) lists, from the file-system implementation chapter; FFS block groups only by name. Pages ① and ③ for the disk cost model and the cleaning cost law; <a href="2026-10-08-storage-3-5-flash-caches.html">page 3.5</a> for the DRAM and write costs that §12 leaves to it.</p>
+  <p><b>Back to the start.</b> <a href="2026-10-08-storage-1-hard-disk-rebuilt.html">① The hard disk</a> · <a href="2026-10-08-storage-2-flash-and-ftl.html">② Flash and the FTL</a> · <a href="2026-10-08-storage-3-garbage-and-write-amplification.html">③ Garbage and write amplification</a></p>
+</section>
+
+</div>

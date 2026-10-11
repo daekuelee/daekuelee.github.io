@@ -1,0 +1,1218 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash and the FTL</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+<style>
+  .shot img{ width:100%; height:auto; display:block; border-radius:4px; border:1px solid var(--line); }
+  .shot .h{ font-family:"JetBrains Mono",monospace; font-size:.72rem; letter-spacing:.06em; color:var(--muted); }
+</style>
+<style>.vid-off{display:grid;gap:4px;padding:14px;border:1.5px dashed var(--line-2);border-radius:6px;background:var(--surface-2);text-decoration:none;color:var(--ink-2);font-size:.82rem;line-height:1.5}.vid-off b{color:var(--accent);font-weight:600}.vid-off i{font-style:normal;color:var(--muted);font-size:.74rem}</style>
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture series">
+  <span>쇼츠 강의</span><span>›</span><span>Storage: OSTEP 37 → 44 → 43</span>
+  <span class="sp"><a href="2026-10-08-storage-1-hard-disk-rebuilt.html">① Hard disk</a> · <b style="color:var(--ink)">② Flash + FTL ★</b> · <a href="2026-10-08-storage-3-garbage-and-write-amplification.html">③ Garbage + WA ★</a> · <a href="2026-10-08-storage-3-5-flash-caches.html">3.5 Flash cache ★</a> · <a href="2026-10-08-storage-4-log-structured-file-system.html">④ LFS</a> · <a href="https://www.youtube.com/watch?v=5Mh3o886qpg">▶ Video (YouTube)</a></span>
+</nav>
+
+<header>
+  <div class="eyebrow">Short lecture · 2026-10-08 · page ② of 4 · importance: ★ core · stands in for OSTEP 44.1–44.7</div>
+  <h1>② Flash and the FTL: what the chip cannot do, and how the SSD hides it</h1>
+  <p class="subtitle">Page ① ended on one property of the hard disk: sector n is a fixed spot, and a rewrite simply overwrites it. Flash cannot overwrite. This page builds up why, from the cell, and then follows the SSD's answer: keep showing the OS the same sector array, but write every new version somewhere new and keep a map of where each sector currently lives.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read · skim = the figure and the CARRY line at the end of the section are enough.</p>
+</header>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>What is physically inside an SSD?</h2><span class="tag t-ctl">skim · figure + carry</span></div>
+
+  <div class="figure" id="fig-board">
+    <div class="scroll">
+      <svg viewBox="0 0 960 780" width="100%" style="min-width:560px" role="img" aria-label="The circuit board of a SATA SSD with its connector, controller and eight NAND flash packages labelled">
+        <image href="img/2026-10-08-ssd-ocz-agility3-board.jpg" x="0" y="70" width="960" height="640"/>
+        <rect x="8" y="4" width="330" height="58" rx="6" class="surf"/>
+        <text x="22" y="28" font-size="20" class="ink" font-weight="600">Connector (SATA)</text>
+        <text x="22" y="52" font-size="16" class="ink2">the sector interface of page ①</text>
+        <path class="arr-a" d="M 120 62 L 90 400"/><circle cx="90" cy="400" r="6" class="accs"/>
+        <rect x="488" y="140" width="414" height="494" rx="6" style="fill:none;stroke:var(--amber);stroke-width:5;stroke-dasharray:12 7"/>
+        <rect x="500" y="4" width="452" height="58" rx="6" class="surf"/>
+        <text x="514" y="28" font-size="20" class="ink" font-weight="600">8 NAND flash packages</text>
+        <text x="514" y="52" font-size="16" class="ink2">the storage; dies stacked inside each</text>
+        <path class="arr-a" d="M 720 62 L 720 140"/>
+        <rect x="320" y="320" width="140" height="140" rx="6" style="fill:none;stroke:var(--amber);stroke-width:5;stroke-dasharray:12 7"/>
+        <rect x="150" y="718" width="360" height="58" rx="6" class="surf"/>
+        <text x="164" y="742" font-size="20" class="ink" font-weight="600">Controller</text>
+        <text x="164" y="766" font-size="16" class="ink2">the FTL runs here (SandForce SF-2281)</text>
+        <path class="arr-a" d="M 330 718 L 380 460"/>
+      </svg>
+    </div>
+    <p class="cap">Figure 1. Inside a 2.5-inch SATA SSD (OCZ Agility 3, 2011): one controller, eight flash packages, a connector, and small power parts. Nothing moves. This controller family is known for working without a separate DRAM chip, so its tables sit in the controller's own memory. Photo: Phiarc, <a href="https://commons.wikimedia.org/wiki/File:OCZ_Agility_3_PCB.jpg">Wikimedia Commons</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>; labels added.</p>
+  </div>
+
+  <div class="figure" id="vid-package">
+    <div class="vs">
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=30s"><i>Video frame not reproduced here (copyright)</i><span>the memory storage microchip on an SSD board</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>①</b> ▶ 0:30 · THE MICROCHIP</span><span>The video's “memory storage microchip” is one of the eight flash packages in Figure 1.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=941s"><i>Video frame not reproduced here (copyright)</i><span>eight dies being stacked into one package</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>②</b> ▶ 15:41 · INSIDE A PACKAGE</span><span>Eight dies stacked, with an interface chip at the bottom that coordinates them.</span></div>
+    </div>
+    <p class="cap">Video 1. Figure 1's board in the video: a package, and the dies stacked inside it. Frames: Branch Education, “How do SSDs Work?” (2020); each card opens that moment on YouTube; the frames are not reproduced here.</p>
+  </div>
+
+
+  <p>An SSD has no motor, no platter and no arm (Figure 1). It is a circuit board with flash chips that hold the data, a controller chip that runs the drive's firmware, a little working memory for that firmware, and a connector that speaks the same sector interface as the hard disk of page ①. OSTEP describes the inside the same way: flash chips for persistent storage, some volatile memory such as SRAM for caching, buffering and mapping tables, and control logic. <span class="src">OSTEP 44.5</span></p>
+  <p>Because nothing moves, there is no seek and no rotation, which removes the cost that dominated page ①. The rest of this page is about the new costs that take its place.</p>
+  <p>Video 1 shows the same board in Branch Education's animation. ① The video's “memory storage microchip” is one of the eight flash packages of Figure 1. ② Inside each package, eight dies are stacked, with an interface chip at the bottom that coordinates them; the creator notes that some designs stack 16. Each die is one flash chip with its own blocks and pages (§2). The controller beside the packages runs the FTL, and the video never shows what it does. <span class="src">Branch Education 0:20–0:55, 15:26–16:06</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>An SSD = flash chips + a controller + a little memory + the same sector interface. No moving parts, so no seek and no rotation.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>What holds a bit, and what are pages and blocks?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-cells">
+    <div class="scroll">
+      <svg viewBox="0 0 760 320" width="760" role="img" aria-label="Left: one cell's charge range divided into 2, 4 and 8 levels for SLC, MLC and TLC. Right: a flash die divided into planes, planes into blocks, and one block into pages">
+        <text x="16" y="18" font-size="12" class="mut">one cell: the trapped charge is read as bits</text>
+                <rect x="40" y="40" width="56" height="100" class="accs"/><rect x="40" y="140" width="56" height="100" class="surf"/>
+                <rect x="140" y="40" width="56" height="50" class="accs"/><rect x="140" y="90" width="56" height="50" class="surf"/><rect x="140" y="140" width="56" height="50" class="accs"/><rect x="140" y="190" width="56" height="50" class="surf"/>
+                <g>
+          <rect x="240" y="40" width="56" height="25" class="accs"/><rect x="240" y="65" width="56" height="25" class="surf"/><rect x="240" y="90" width="56" height="25" class="accs"/><rect x="240" y="115" width="56" height="25" class="surf"/>
+          <rect x="240" y="140" width="56" height="25" class="accs"/><rect x="240" y="165" width="56" height="25" class="surf"/><rect x="240" y="190" width="56" height="25" class="accs"/><rect x="240" y="215" width="56" height="25" class="surf"/>
+        </g>
+        <path d="M 22 240 L 22 46" class="arr"/><path d="M 17 52 L 22 42 L 27 52" class="arr"/>
+        <text x="28" y="36" font-size="10" class="mut">charge</text>
+        <g font-size="12" text-anchor="middle">
+          <text x="68" y="260" class="ink" font-weight="600">SLC</text><text x="168" y="260" class="ink" font-weight="600">MLC</text><text x="268" y="260" class="ink" font-weight="600">TLC</text>
+          <text x="68" y="277" class="ink2">2 levels</text><text x="168" y="277" class="ink2">4 levels</text><text x="268" y="277" class="ink2">8 levels</text>
+          <text x="68" y="293" class="ink2">1 bit</text><text x="168" y="293" class="ink2">2 bits</text><text x="268" y="293" class="ink2">3 bits</text>
+        </g>
+        <text x="16" y="314" font-size="11" class="ink2">more levels in one cell: more bits, slower writes, shorter life</text>
+
+                <text x="390" y="18" font-size="12" class="mut">one flash chip (die)</text>
+        <rect x="390" y="26" width="360" height="214" rx="8" class="surf"/>
+        <rect x="402" y="44" width="166" height="184" rx="5" class="surf"/>
+        <rect x="576" y="44" width="166" height="184" rx="5" class="surf"/>
+        <text x="410" y="62" font-size="11" class="mut">plane 0</text>
+        <text x="584" y="62" font-size="11" class="mut">plane 1</text>
+        <rect x="410" y="72" width="150" height="34" class="accs"/>
+        <g class="surf"><rect x="410" y="112" width="150" height="34"/><rect x="410" y="152" width="150" height="34"/><rect x="410" y="192" width="150" height="28"/></g>
+        <g class="surf"><rect x="584" y="72" width="150" height="34"/><rect x="584" y="112" width="150" height="34"/><rect x="584" y="152" width="150" height="34"/><rect x="584" y="192" width="150" height="28"/></g>
+        <rect x="410" y="72" width="18.75" height="34" class="ambs"/>
+        <g class="ln"><path d="M428.75 72 V106"/><path d="M447.5 72 V106"/><path d="M466.25 72 V106"/><path d="M485 72 V106"/><path d="M503.75 72 V106"/><path d="M522.5 72 V106"/><path d="M541.25 72 V106"/></g>
+        <text x="390" y="262" font-size="12" class="acc" font-weight="600">block (teal) = erase unit · 128–256 KB = 32–64 pages</text>
+        <text x="390" y="282" font-size="12" class="amb" font-weight="600">page (amber) = read and program unit · about 4 KB</text>
+        <text x="390" y="302" font-size="12" class="ink2">a chip has several planes; a plane has many blocks</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 2. Left: one cell's range of charge, cut into 2, 4 or 8 levels; each extra bit doubles the levels that must fit in the same range. Right: a die is planes, a plane is blocks, a block is pages. Block 0 of plane 0 is drawn cut into pages (eight shown), with page 0 in amber.</p>
+  </div>
+
+  <div class="figure" id="vid-cell-to-die">
+    <div class="vs">
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=429s"><i>Video frame not reproduced here (copyright)</i><span>one charge-trap cell with eight levels labelled 000 to 111</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>①</b> ▶ 7:09 · CELL</span><span>Eight charge levels, read as 3 bits: the TLC column of Figure 2, left.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=525s"><i>Video frame not reproduced here (copyright)</i><span>a vertical string of cells with a control gate on each layer</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>②</b> ▶ 8:45 · STRING</span><span>Cells stacked on one vertical channel, a control gate on each layer, one cell at a time.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=586s"><i>Video frame not reproduced here (copyright)</i><span>one horizontal layer outlined as a page, one vertical string outlined</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>③</b> ▶ 9:46 · PAGE</span><span>One layer's cells across a row share one control gate and switch on together: the read and program unit.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=645s"><i>Video frame not reproduced here (copyright)</i><span>two blocks labelled column, row, string, cell and layer</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>④</b> ▶ 10:45 · BLOCK</span><span>Every layer of a few rows of strings: the erase unit.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=837s"><i>Video frame not reproduced here (copyright)</i><span>a page 30,000 to 60,000 cells wide, 96 to 136 layers tall</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>⑤</b> ▶ 13:57 · REAL SIZES</span><span>2020 chips: 96–136 layers, pages 30,000–60,000 cells wide, a block every 4–8 rows.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=909s"><i>Video frame not reproduced here (copyright)</i><span>a die with two cell arrays, a row decoder and page buffers</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>⑥</b> ▶ 15:09 · DIE</span><span>Two halves = plane 0 and plane 1 of Figure 2, with a row decoder and a page buffer.</span></div>
+    </div>
+    <p class="cap">Video 2. Figure 2, right, built in 3D from the inside out: cell → string → page → block → real sizes → die. Frames: Branch Education, “How do SSDs Work?” (2020); each card opens that moment on YouTube; the frames are not reproduced here.</p>
+  </div>
+
+  <div class="figure" id="fig-count">
+    <div class="scroll">
+      <svg viewBox="0 0 760 374" width="760" role="img" aria-label="A toy block drawn as a grid of 6 rows by 10 layers: one square is one layer of one row and holds 3 pages in TLC, one column is a row of 30 pages, the whole grid is the block of 180 pages; below, a table of pages per block for four chips">
+        <text x="16" y="20" font-size="12" class="mut">the video’s toy block, seen from the side: 6 rows of strings × 10 layers</text>
+        <rect x="90" y="40" width="34" height="18" class="surf"/>
+        <rect x="90" y="58" width="34" height="18" class="surf"/>
+        <rect x="90" y="76" width="34" height="18" class="surf"/>
+        <rect x="90" y="94" width="34" height="18" class="surf"/>
+        <rect x="90" y="112" width="34" height="18" class="surf"/>
+        <rect x="90" y="130" width="34" height="18" class="surf"/>
+        <rect x="90" y="148" width="34" height="18" class="surf"/>
+        <rect x="90" y="166" width="34" height="18" class="surf"/>
+        <rect x="90" y="184" width="34" height="18" class="surf"/>
+        <rect x="90" y="202" width="34" height="18" class="surf"/>
+        <rect x="124" y="40" width="34" height="18" class="surf"/>
+        <rect x="124" y="58" width="34" height="18" class="surf"/>
+        <rect x="124" y="76" width="34" height="18" class="surf"/>
+        <rect x="124" y="94" width="34" height="18" class="surf"/>
+        <rect x="124" y="112" width="34" height="18" class="surf"/>
+        <rect x="124" y="130" width="34" height="18" class="surf"/>
+        <rect x="124" y="148" width="34" height="18" class="surf"/>
+        <rect x="124" y="166" width="34" height="18" class="surf"/>
+        <rect x="124" y="184" width="34" height="18" class="surf"/>
+        <rect x="124" y="202" width="34" height="18" class="surf"/>
+        <rect x="158" y="40" width="34" height="18" class="surf"/>
+        <rect x="158" y="58" width="34" height="18" class="surf"/>
+        <rect x="158" y="76" width="34" height="18" class="surf"/>
+        <rect x="158" y="94" width="34" height="18" class="surf"/>
+        <rect x="158" y="112" width="34" height="18" class="surf"/>
+        <rect x="158" y="130" width="34" height="18" class="surf"/>
+        <rect x="158" y="148" width="34" height="18" class="surf"/>
+        <rect x="158" y="166" width="34" height="18" class="surf"/>
+        <rect x="158" y="184" width="34" height="18" class="surf"/>
+        <rect x="158" y="202" width="34" height="18" class="surf"/>
+        <rect x="192" y="40" width="34" height="18" class="surf"/>
+        <rect x="192" y="58" width="34" height="18" class="surf"/>
+        <rect x="192" y="76" width="34" height="18" class="surf"/>
+        <rect x="192" y="94" width="34" height="18" class="surf"/>
+        <rect x="192" y="112" width="34" height="18" class="surf"/>
+        <rect x="192" y="130" width="34" height="18" class="surf"/>
+        <rect x="192" y="148" width="34" height="18" class="surf"/>
+        <rect x="192" y="166" width="34" height="18" class="surf"/>
+        <rect x="192" y="184" width="34" height="18" class="surf"/>
+        <rect x="192" y="202" width="34" height="18" class="surf"/>
+        <rect x="226" y="40" width="34" height="18" class="surf"/>
+        <rect x="226" y="58" width="34" height="18" class="surf"/>
+        <rect x="226" y="76" width="34" height="18" class="surf"/>
+        <rect x="226" y="94" width="34" height="18" class="surf"/>
+        <rect x="226" y="112" width="34" height="18" class="surf"/>
+        <rect x="226" y="130" width="34" height="18" class="surf"/>
+        <rect x="226" y="148" width="34" height="18" class="surf"/>
+        <rect x="226" y="166" width="34" height="18" class="surf"/>
+        <rect x="226" y="184" width="34" height="18" class="surf"/>
+        <rect x="226" y="202" width="34" height="18" class="surf"/>
+        <rect x="260" y="40" width="34" height="18" class="surf"/>
+        <rect x="260" y="58" width="34" height="18" class="surf"/>
+        <rect x="260" y="76" width="34" height="18" class="surf"/>
+        <rect x="260" y="94" width="34" height="18" class="surf"/>
+        <rect x="260" y="112" width="34" height="18" class="surf"/>
+        <rect x="260" y="130" width="34" height="18" class="surf"/>
+        <rect x="260" y="148" width="34" height="18" class="surf"/>
+        <rect x="260" y="166" width="34" height="18" class="surf"/>
+        <rect x="260" y="184" width="34" height="18" class="surf"/>
+        <rect x="260" y="202" width="34" height="18" class="surf"/>
+        <rect x="124" y="148" width="34" height="18" class="ambs"/>
+        <rect x="226" y="40" width="34" height="180" style="fill:none;stroke:var(--accent);stroke-width:3"/>
+        <rect x="86" y="36" width="212" height="188" rx="3" style="fill:none;stroke:var(--violet);stroke-width:2"/>
+        <path d="M76 40 V220" class="ln"/>
+        <text x="72" y="134" font-size="11" class="mut" text-anchor="end">10 layers</text>
+        <path d="M90 232 H294" class="ln"/>
+        <text x="192" y="248" font-size="11" class="mut" text-anchor="middle">6 rows of strings</text>
+        <text x="141.0" y="161" font-size="11" class="ink" text-anchor="middle" font-weight="600">①</text>
+        <text x="243.0" y="32" font-size="11" class="acc" text-anchor="middle" font-weight="600">②</text>
+        <text x="308" y="48" font-size="11" class="vio" font-weight="600">③</text>
+        <text x="330" y="52" font-size="13" class="amb" font-weight="600">① one square = one layer of one row</text>
+        <text x="330" y="70" font-size="12" class="ink2">a line of cells on one word line, running into the page;</text>
+        <text x="330" y="86" font-size="12" class="ink2">TLC keeps 3 bits per cell, so it holds 3 pages:</text>
+        <text x="330" y="102" font-size="12" class="ink2">lower, middle and upper</text>
+        <text x="330" y="130" font-size="13" class="acc" font-weight="600">② one row = all its layers</text>
+        <text x="330" y="148" font-size="12" class="ink2 mono">10 layers × 3 pages = 30 pages</text>
+        <text x="330" y="176" font-size="13" class="vio" font-weight="600">③ the block = all its rows</text>
+        <text x="330" y="194" font-size="12" class="ink2 mono">6 rows × 10 layers × 3 bits = 180 pages</text>
+        <text x="330" y="226" font-size="13" class="ink" font-weight="600">pages per block = layers × rows × bits per cell</text>
+        <path d="M16 262 H744" class="ln"/>
+        <text x="20" y="280" font-size="10" class="mut mono">CHIP</text>
+        <text x="210" y="280" font-size="10" class="mut mono">LAYERS × ROWS × BITS</text>
+        <text x="400" y="280" font-size="10" class="mut mono">PAGES PER BLOCK</text>
+        <text x="530" y="280" font-size="10" class="mut mono">BLOCK SIZE</text>
+        <text x="20" y="302" font-size="12" class="ink">the video’s toy</text>
+        <text x="210" y="302" font-size="11" class="ink2 mono">10 × 6 × 3</text>
+        <text x="400" y="302" font-size="11" class="ink2 mono">180</text>
+        <text x="530" y="302" font-size="11" class="ink2 mono">(no page size given)</text>
+        <text x="20" y="322" font-size="12" class="ink">2014 MLC chip</text>
+        <text x="210" y="322" font-size="11" class="ink2 mono">24 × 8 × 2</text>
+        <text x="400" y="322" font-size="11" class="ink2 mono">384</text>
+        <text x="530" y="322" font-size="11" class="ink2 mono">384 × 8 KB = 3 MB</text>
+        <text x="20" y="342" font-size="12" class="ink">2020 TLC chips</text>
+        <text x="210" y="342" font-size="11" class="ink2 mono">96–136 × 4–8 × 3</text>
+        <text x="400" y="342" font-size="11" class="ink2 mono">≈ 1,150–3,260</text>
+        <text x="530" y="342" font-size="11" class="ink2 mono">≈ 4–24 MB (video’s widths)</text>
+        <text x="20" y="362" font-size="12" class="ink">OSTEP, older chips</text>
+        <text x="210" y="362" font-size="11" class="ink2 mono">—</text>
+        <text x="400" y="362" font-size="11" class="ink2 mono">32–64</text>
+        <text x="530" y="362" font-size="11" class="ink2 mono">32–64 × 4 KB = 128–256 KB</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 3. Counting the pages in a block, on the video’s toy block (10 layers, 6 rows of strings, TLC). ① A square is one layer of one row: one word line’s cells, three pages in TLC. ② A row is all its layers. ③ The block is all its rows. The table puts real chips through the same product.</p>
+  </div>
+
+
+  <p>Flash stores bits as electric charge trapped inside a transistor, called a <b>cell</b>, and the amount of trapped charge is read back as a binary value. A <b>single-level cell</b> (SLC) tells two levels apart and holds one bit. A <b>multi-level cell</b> (MLC) tells four levels apart and holds two bits, and a <b>triple-level cell</b> (TLC) eight levels and three bits (Figure 2, left). <span class="src">OSTEP 44.1</span></p>
+  <p>More levels per cell buy capacity and cost speed and lifetime, because the levels must fit into the same range of charge and each band gets narrower. OSTEP's numbers show both costs: programming a page takes 200–300 µs on SLC but about 900–1,350 µs on TLC, and SLC blocks are rated for about 100,000 erases against about 10,000 for MLC. SLC chips are faster and more expensive. <span class="src">OSTEP 44.1, 44.4, Figure 44.2</span></p>
+  <p>Cells are grouped at two sizes, and chapter 44 turns on the difference between them (Figure 2, right). A <b>page</b> is a few KB, typically 4 KB; it is the unit that is read, and the unit that is written (flash calls writing "programming"). A <b>block</b>, also called an erase block, is typically 128 KB or 256 KB, so it holds 32 to 64 pages; it is the unit that is erased. Many blocks form a <b>plane</b>, which OSTEP also calls a bank, and a chip has several planes. <span class="src">OSTEP 44.2</span></p>
+  <p>The words clash with older ones, and OSTEP warns about it: a flash block is not a file-system block, and a flash page is not a virtual-memory page. On these pages "block" and "page" mean the flash units, and "logical block" means the sector-array number the OS uses. <span class="src">OSTEP 44.2, tip on terminology</span></p>
+  <p>Video 2 builds the same hierarchy in 3D, from the inside out. ① One charge-trap cell holds one of eight charge levels, read as three bits: the TLC column of Figure 2. ② Cells are stacked along one vertical channel into a <b>string</b>, with a control gate on each layer, and only one cell of a string is used at a time. OSTEP's model has no strings; they are the “V” in V-NAND. ③ All the cells of one layer across a row share one control gate, so they switch on together. That is why the page is the unit of reading and programming: the chip cannot select fewer cells than one shared gate drives. In a TLC chip the three bits of each cell belong to three different pages, so the cells of one layer in one row hold three pages in OSTEP's sense (Figure 3, ①). ④ A block is every layer of a few rows of strings, and it is erased as a whole. <span class="src">Branch Education 5:14–11:55</span></p>
+  <p>⑤ The real sizes are much larger than OSTEP's. Chips in 2020 had 96–136 layers, pages 30,000–60,000 cells wide, and a block every 4–8 rows, which makes blocks of several MB against OSTEP's 128–256 KB. The creator's notes give a 2014 chip with 8 KB pages and 384 pages per block, a 3 MB block. ⑥ One die has two halves, the plane 0 and plane 1 of Figure 2. A row decoder beside them picks one page, and a page buffer below holds that page while it is read out or programmed. <span class="src">Branch Education 12:57–15:26; creator's notes (en-CA subtitles) 13:21–13:54, 15:06</span></p>
+  <p>Figure 3 counts the pages in a block on the video's toy block: 10 layers, 6 rows of strings, TLC cells. ① One square is one layer of one row, the cells along one word line, running back through the chip. Each cell keeps three bits, and each bit belongs to a different page, the lower, middle and upper page, so one square holds three pages. ② A row is all its layers: 10 × 3 = 30 pages. ③ The block is all its rows: 6 × 10 × 3 = 180 pages. So pages per block = layers × rows × bits per cell. The 2014 chip in the creator's notes gives 24 × 8 × 2 = 384 pages of 8 KB, a 3 MB block. OSTEP's 32–64 pages and 128–256 KB come from older chips with a single layer of cells; stacking layers multiplied them. <span class="src">Branch Education 10:16–10:36, 12:19, 13:25–14:00; creator's notes 13:21–13:54; OSTEP 44.2</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A cell holds 1–3 bits as charge. Page (about 4 KB) = the unit of reading and writing. Block = the unit of erasing, with layers × rows × bits per cell pages: 32–64 in OSTEP's older chips, hundreds to thousands in stacked ones.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>Why can't a flash page be overwritten?</h2><span class="tag t-ks">★ core · read every line</span></div>
+
+  <div class="figure" id="fig-states">
+    <div class="scroll">
+      <svg viewBox="0 0 760 340" width="760" role="img" aria-label="Top: the three page states INVALID, ERASED and VALID with the operations between them. Bottom: a 4-page block before an erase, after the erase, and after programming page 0">
+        <defs>
+          <marker id="h2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker>
+          <marker id="h2s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="stp"/></marker>
+        </defs>
+        <text x="16" y="20" font-size="12" class="mut">state of one page</text>
+        <rect x="40" y="34" width="110" height="48" rx="6" class="surf"/>
+        <text x="95" y="56" font-size="14" class="ink" text-anchor="middle" font-weight="600">i</text>
+        <text x="95" y="73" font-size="10" class="mut" text-anchor="middle">INVALID</text>
+        <rect x="250" y="34" width="110" height="48" rx="6" class="accs"/>
+        <text x="305" y="56" font-size="14" class="ink" text-anchor="middle" font-weight="600">E</text>
+        <text x="305" y="73" font-size="10" class="mut" text-anchor="middle">ERASED</text>
+        <rect x="460" y="34" width="110" height="48" rx="6" class="ambs"/>
+        <text x="515" y="56" font-size="14" class="ink" text-anchor="middle" font-weight="600">V</text>
+        <text x="515" y="73" font-size="10" class="mut" text-anchor="middle">VALID</text>
+        <path d="M150 58 L246 58" class="arr" marker-end="url(#h2a)"/>
+        <text x="198" y="100" font-size="11" class="ink2" text-anchor="middle">erase</text>
+        <text x="198" y="113" font-size="11" class="ink2" text-anchor="middle">(whole block)</text>
+        <path d="M360 58 L456 58" class="arr" marker-end="url(#h2a)"/>
+        <text x="408" y="100" font-size="11" class="ink2" text-anchor="middle">program</text>
+        <text x="408" y="113" font-size="11" class="ink2" text-anchor="middle">(one page)</text>
+        <path d="M515 84 C 515 150, 305 150, 305 88" class="arr" marker-end="url(#h2a)"/>
+        <text x="410" y="152" font-size="11" class="ink2" text-anchor="middle">erase the whole block → back to E</text>
+        <path d="M492 34 C 492 4, 560 4, 556 32" class="arr-s" marker-end="url(#h2s)"/>
+        <text x="574" y="20" font-size="11" class="stp" font-weight="600">program again: refused</text>
+        <text x="600" y="58" font-size="12" class="ink2">erase: every bit → 1</text>
+        <text x="600" y="76" font-size="12" class="ink2">program: 1 → 0 only</text>
+        <text x="600" y="94" font-size="12" class="ink2" font-weight="600">0 → 1 needs an erase</text>
+
+                <text x="16" y="186" font-size="12" class="ink" font-weight="600">① before: four VALID pages</text>
+        <text x="286" y="186" font-size="12" class="ink" font-weight="600">② after erase()</text>
+        <text x="552" y="186" font-size="12" class="ink" font-weight="600">③ after program(0) = 00000011</text>
+        <rect x="10" y="196" width="196" height="100" rx="6" class="surf"/>
+        <rect x="280" y="196" width="196" height="100" rx="6" class="surf"/>
+        <rect x="546" y="196" width="196" height="100" rx="6" class="surf"/>
+        <g font-size="13" class="mono">
+          <text x="18" y="216" class="mut">p0</text><text x="50" y="216" class="ink">00011000</text><text x="150" y="216" class="ink2">V</text>
+          <text x="18" y="240" class="mut">p1</text><text x="50" y="240" class="ink">11001110</text><text x="150" y="240" class="ink2">V</text>
+          <text x="18" y="264" class="mut">p2</text><text x="50" y="264" class="ink">00000001</text><text x="150" y="264" class="ink2">V</text>
+          <text x="18" y="288" class="mut">p3</text><text x="50" y="288" class="ink">00111111</text><text x="150" y="288" class="ink2">V</text>
+          <text x="288" y="216" class="mut">p0</text><text x="320" y="216" class="acc">11111111</text><text x="420" y="216" class="ink2">E</text>
+          <text x="288" y="240" class="mut">p1</text><text x="320" y="240" class="acc">11111111</text><text x="420" y="240" class="ink2">E</text>
+          <text x="288" y="264" class="mut">p2</text><text x="320" y="264" class="acc">11111111</text><text x="420" y="264" class="ink2">E</text>
+          <text x="288" y="288" class="mut">p3</text><text x="320" y="288" class="acc">11111111</text><text x="420" y="288" class="ink2">E</text>
+          <text x="554" y="216" class="mut">p0</text><text x="586" y="216" class="ink" font-weight="600">00000011</text><text x="686" y="216" class="ink2">V</text>
+          <text x="554" y="240" class="mut">p1</text><text x="586" y="240" class="stp">11111111</text><text x="686" y="240" class="ink2">E</text>
+          <text x="554" y="264" class="mut">p2</text><text x="586" y="264" class="stp">11111111</text><text x="686" y="264" class="ink2">E</text>
+          <text x="554" y="288" class="mut">p3</text><text x="586" y="288" class="stp">11111111</text><text x="686" y="288" class="ink2">E</text>
+        </g>
+        <path d="M212 246 L272 246" class="arr" marker-end="url(#h2a)"/>
+        <path d="M482 246 L540 246" class="arr" marker-end="url(#h2a)"/>
+        <text x="16" y="324" font-size="12" class="stp">Pages 1–3 lost their old contents in ②. To keep them, they had to be copied out before the erase.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 4. Top: the life of one page (OSTEP 44.3). Program moves a page from ERASED to VALID, once; the only way back is to erase its whole block. Bottom: OSTEP's worked example with toy 8-bit pages. Replacing page 0 needs an erase first, and the erase wipes all four pages.</p>
+  </div>
+
+  <div class="figure" id="vid-erase">
+    <div class="vs">
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=477s"><i>Video frame not reproduced here (copyright)</i><span>the charge trap emptied by an erase, reading 111</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>①</b> ▶ 7:57 · ERASE</span><span>All the trapped charge is pulled out and the cell reads 111: erase sets bits to 1.</span></div>
+      <div class="col shot"><a class="vid-off" href="https://www.youtube.com/watch?v=5Mh3o886qpg&amp;t=701s"><i>Video frame not reproduced here (copyright)</i><span>bitline selectors and control gate selectors lighting one active page</span><b>▶ Watch this moment on YouTube</b></a>
+        <span class="h"><b>②</b> ▶ 11:41 · ONE PAGE LIT</span><span>A row selector and a layer selector light one page to read or program; an erase clears the whole block.</span></div>
+    </div>
+    <p class="cap">Video 3. Figure 4's two rules in the hardware: charge comes out only by erasing, and one page is programmed while the whole block is erased. Frames: Branch Education, “How do SSDs Work?” (2020); each card opens that moment on YouTube; the frames are not reproduced here.</p>
+  </div>
+
+  <div class="figure" id="fig-cell">
+    <div class="scroll">
+      <svg viewBox="0 0 760 416" width="760" role="img" aria-label="Three panels on two strings of four cells: read, where an empty cell conducts and reads 1; program, where a 20-volt gate pulls electrons into one cell while a high bitline protects the other; erase, where a shared body at 20 volts pushes electrons out of every cell. Below, eight TLC levels from empty 111 to full 000">
+        <defs><marker id="h5a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker><marker id="h5s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="stp"/></marker><marker id="h5m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="amb"/></marker></defs>
+        <text x="8" y="22" font-size="13" class="ink" font-weight="600">① read</text>
+        <path d="M40 74 H200" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M40 108 H200" style="stroke:var(--amber);stroke-width:2.2"/>
+        <path d="M40 142 H200" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M40 176 H200" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <rect x="77" y="44" width="6" height="160" class="surf"/>
+        <rect x="157" y="44" width="6" height="160" class="surf"/>
+        <path d="M66 44 H94" style="stroke:var(--ink-2);stroke-width:2"/>
+        <path d="M146 44 H174" style="stroke:var(--ink-2);stroke-width:2"/>
+        <rect x="50" y="204" width="140" height="10" class="surf"/>
+        <rect x="62" y="62" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="72" cy="74" r="2.6"/><circle cx="80" cy="74" r="2.6"/><circle cx="88" cy="74" r="2.6"/></g>
+        <rect x="62" y="96" width="36" height="24" rx="3" class="accs"/>
+        <rect x="62" y="130" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="72" cy="142" r="2.6"/><circle cx="80" cy="142" r="2.6"/><circle cx="88" cy="142" r="2.6"/></g>
+        <rect x="62" y="164" width="36" height="24" rx="3" class="surf"/>
+        <rect x="142" y="62" width="36" height="24" rx="3" class="surf"/>
+        <rect x="142" y="96" width="36" height="24" rx="3" class="stps"/>
+        <g class="ink"><circle cx="152" cy="108" r="2.6"/><circle cx="160" cy="108" r="2.6"/><circle cx="168" cy="108" r="2.6"/></g>
+        <rect x="142" y="130" width="36" height="24" rx="3" class="surf"/>
+        <rect x="142" y="164" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="152" cy="176" r="2.6"/><circle cx="160" cy="176" r="2.6"/><circle cx="168" cy="176" r="2.6"/></g>
+        <text x="36" y="112" font-size="10" class="amb" text-anchor="end">V<tspan font-size="8">read</tspan></text>
+        <text x="36" y="180" font-size="10" class="mut" text-anchor="end">V<tspan font-size="8">pass</tspan></text>
+        <path d="M104 50 V196" style="stroke:var(--accent);stroke-width:2" marker-end="url(#h5a)"/>
+        <text x="108" y="52" font-size="10" class="acc">current</text>
+        <text x="80" y="36" font-size="12" class="acc" text-anchor="middle" font-weight="600">→ 1</text>
+        <text x="160" y="36" font-size="12" class="stp" text-anchor="middle" font-weight="600">→ 0</text>
+        <text x="184" y="52" font-size="10" class="stp">no current</text>
+        <text x="8" y="248" font-size="11" class="acc">empty cell: current flows = 1</text>
+        <text x="8" y="264" font-size="11" class="stp">charged cell: blocked = 0</text>
+        <text x="8" y="280" font-size="11" class="ink2">so an empty, erased page reads all 1s</text>
+        <text x="264" y="22" font-size="13" class="ink" font-weight="600">② program (one page)</text>
+        <path d="M296 74 H456" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M296 108 H456" style="stroke:var(--amber);stroke-width:2.2"/>
+        <path d="M296 142 H456" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M296 176 H456" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <rect x="333" y="44" width="6" height="160" class="surf"/>
+        <rect x="413" y="44" width="6" height="160" class="surf"/>
+        <path d="M322 44 H350" style="stroke:var(--ink-2);stroke-width:2"/>
+        <path d="M402 44 H430" style="stroke:var(--ink-2);stroke-width:2"/>
+        <rect x="306" y="204" width="140" height="10" class="surf"/>
+        <rect x="318" y="62" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="328" cy="74" r="2.6"/><circle cx="336" cy="74" r="2.6"/><circle cx="344" cy="74" r="2.6"/></g>
+        <rect x="318" y="96" width="36" height="24" rx="3" class="ambs"/>
+        <g class="ink"><circle cx="328" cy="108" r="2.6"/><circle cx="336" cy="108" r="2.6"/><circle cx="344" cy="108" r="2.6"/></g>
+        <rect x="318" y="130" width="36" height="24" rx="3" class="surf"/>
+        <rect x="318" y="164" width="36" height="24" rx="3" class="surf"/>
+        <rect x="398" y="62" width="36" height="24" rx="3" class="surf"/>
+        <rect x="398" y="96" width="36" height="24" rx="3" class="surf"/>
+        <rect x="398" y="130" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="408" cy="142" r="2.6"/><circle cx="416" cy="142" r="2.6"/><circle cx="424" cy="142" r="2.6"/></g>
+        <rect x="398" y="164" width="36" height="24" rx="3" class="surf"/>
+        <text x="292" y="112" font-size="10" class="amb" text-anchor="end">≈20 V</text>
+        <text x="336" y="36" font-size="11" class="ink" text-anchor="middle" font-weight="600">0 V</text>
+        <text x="416" y="36" font-size="11" class="mut" text-anchor="middle">high</text>
+        <path d="M306 126 L326 112" style="stroke:var(--amber);stroke-width:1.6" marker-end="url(#h5m)"/>
+        <text x="302" y="138" font-size="10" class="amb" text-anchor="end">e⁻ in</text>
+        <text x="440" y="102" font-size="10" class="mut">kept out</text>
+        <text x="264" y="248" font-size="11" class="amb">the gate pulls electrons in,</text>
+        <text x="264" y="264" font-size="11" class="ink2">cell by cell: a high bitline blocks it</text>
+        <text x="264" y="280" font-size="11" class="ink2" font-weight="600">charge can be added, never removed</text>
+        <text x="520" y="22" font-size="13" class="ink" font-weight="600">③ erase (whole block)</text>
+        <path d="M552 74 H712" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M552 108 H712" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M552 142 H712" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <path d="M552 176 H712" style="stroke:var(--line-2);stroke-width:1.2"/>
+        <rect x="589" y="44" width="6" height="160" class="surf"/>
+        <rect x="669" y="44" width="6" height="160" class="surf"/>
+        <path d="M578 44 H606" style="stroke:var(--ink-2);stroke-width:2"/>
+        <path d="M658 44 H686" style="stroke:var(--ink-2);stroke-width:2"/>
+        <rect x="562" y="204" width="140" height="10" class="stps"/>
+        <rect x="574" y="62" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="584" cy="74" r="2.6"/><circle cx="592" cy="74" r="2.6"/><circle cx="600" cy="74" r="2.6"/></g>
+        <rect x="574" y="96" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="584" cy="108" r="2.6"/><circle cx="592" cy="108" r="2.6"/><circle cx="600" cy="108" r="2.6"/></g>
+        <rect x="574" y="130" width="36" height="24" rx="3" class="surf"/>
+        <rect x="574" y="164" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="584" cy="176" r="2.6"/><circle cx="592" cy="176" r="2.6"/><circle cx="600" cy="176" r="2.6"/></g>
+        <rect x="654" y="62" width="36" height="24" rx="3" class="surf"/>
+        <rect x="654" y="96" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="664" cy="108" r="2.6"/><circle cx="672" cy="108" r="2.6"/><circle cx="680" cy="108" r="2.6"/></g>
+        <rect x="654" y="130" width="36" height="24" rx="3" class="surf"/>
+        <g class="ink"><circle cx="664" cy="142" r="2.6"/><circle cx="672" cy="142" r="2.6"/><circle cx="680" cy="142" r="2.6"/></g>
+        <rect x="654" y="164" width="36" height="24" rx="3" class="surf"/>
+        <text x="548" y="112" font-size="10" class="mut" text-anchor="end">all 0 V</text>
+        <text x="632" y="230" font-size="10" class="stp" text-anchor="middle" font-weight="600">shared body ≈ 20 V</text>
+        <path d="M612 74 L626 66" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M612 108 L626 100" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M612 142 L626 134" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M612 176 L626 168" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M692 74 L706 66" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M692 108 L706 100" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M692 142 L706 134" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <path d="M692 176 L706 168" style="stroke:var(--stop);stroke-width:1.4" marker-end="url(#h5s)"/>
+        <text x="520" y="248" font-size="11" class="stp">the body pushes electrons out of</text>
+        <text x="520" y="264" font-size="11" class="ink2">every cell it touches: every page</text>
+        <text x="520" y="280" font-size="11" class="ink2" font-weight="600">of the block, never one alone</text>
+        <path d="M16 300 H744" class="ln"/>
+        <text x="16" y="322" font-size="13" class="ink" font-weight="600">④ TLC: a cell’s value counts the read voltages at which it still conducts</text>
+        <rect x="20" y="336" width="80" height="28" class="accs"/>
+        <text x="96" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">111</text>
+        <path d="M104 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="108" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="116" cy="350" r="2.2"/></g>
+        <text x="184" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">110</text>
+        <path d="M192 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="196" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="204" cy="350" r="2.2"/><circle cx="210" cy="350" r="2.2"/></g>
+        <text x="272" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">101</text>
+        <path d="M280 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="284" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="292" cy="350" r="2.2"/><circle cx="298" cy="350" r="2.2"/><circle cx="304" cy="350" r="2.2"/></g>
+        <text x="360" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">100</text>
+        <path d="M368 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="372" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="380" cy="350" r="2.2"/><circle cx="386" cy="350" r="2.2"/><circle cx="392" cy="350" r="2.2"/><circle cx="398" cy="350" r="2.2"/></g>
+        <text x="448" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">011</text>
+        <path d="M456 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="460" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="468" cy="350" r="2.2"/><circle cx="474" cy="350" r="2.2"/><circle cx="480" cy="350" r="2.2"/><circle cx="486" cy="350" r="2.2"/><circle cx="492" cy="350" r="2.2"/></g>
+        <text x="536" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">010</text>
+        <path d="M544 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="548" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="556" cy="350" r="2.2"/><circle cx="562" cy="350" r="2.2"/><circle cx="568" cy="350" r="2.2"/><circle cx="574" cy="350" r="2.2"/><circle cx="580" cy="350" r="2.2"/><circle cx="586" cy="350" r="2.2"/></g>
+        <text x="624" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">001</text>
+        <path d="M632 330 V370" style="stroke:var(--amber);stroke-width:1.4;stroke-dasharray:3 2"/>
+        <rect x="636" y="336" width="80" height="28" class="surf"/>
+        <g class="ink"><circle cx="644" cy="350" r="2.2"/><circle cx="650" cy="350" r="2.2"/><circle cx="656" cy="350" r="2.2"/><circle cx="662" cy="350" r="2.2"/><circle cx="668" cy="350" r="2.2"/><circle cx="674" cy="350" r="2.2"/><circle cx="680" cy="350" r="2.2"/></g>
+        <text x="712" y="355" font-size="12" class="ink mono" text-anchor="end" font-weight="600">000</text>
+        <text x="20" y="388" font-size="11" class="ink2">empty = 111 (erased) · each electron level blocks one more read voltage (dashed) · full = 000</text>
+        <text x="20" y="404" font-size="11" class="mut">so more charge reads as a smaller number; real chips relabel the levels in Gray code, neighbours one bit apart</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 5. What the three operations do to the cells, on two strings of four layers (amber = the chosen word line, dots = trapped electrons). ① Read asks one question per cell: does current flow? ② Program pulls charge in through the gate, one page at a time and cell by cell. ③ Erase pushes it out through the body that the whole block shares. ④ Why erased reads 1, and why more charge reads as a smaller number.</p>
+  </div>
+
+  <div class="figure" id="fig-once">
+    <div class="scroll">
+      <svg viewBox="0 0 760 304" width="760" role="img" aria-label="Four panels on why a flash page is programmed once per erase: a second program can only clear bits; the page ECC must change in places that need 0 to 1; each program pulse leaks charge into neighbouring cells; in TLC one cell carries three pages. Below, the datasheet rule NOP equals 1">
+        <text x="16" y="22" font-size="13" class="ink" font-weight="600">① only 1 → 0, again</text>
+        <text x="20" y="50" font-size="11" class="mut">now</text>
+        <text x="20" y="74" font-size="11" class="mut">wanted</text>
+        <text x="80" y="50" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="80" y="74" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="102" y="50" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="102" y="74" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="124" y="50" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="124" y="74" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="146" y="50" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="146" y="74" font-size="14" class="stp mono" text-anchor="middle" font-weight="600">1</text>
+        <rect x="137" y="58" width="18" height="22" rx="3" style="fill:none;stroke:var(--stop);stroke-width:1.4"/>
+        <text x="168" y="50" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="168" y="74" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="190" y="50" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="190" y="74" font-size="14" class="ink mono" text-anchor="middle">1</text>
+        <text x="212" y="50" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="212" y="74" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="234" y="50" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="234" y="74" font-size="14" class="ink mono" text-anchor="middle">0</text>
+        <text x="20" y="104" font-size="11" class="stp">red: 0 → 1, which only an erase does</text>
+        <text x="20" y="120" font-size="11" class="ink2">new data is an arbitrary pattern,</text>
+        <text x="20" y="136" font-size="11" class="ink2">so some bit almost always fails</text>
+        <text x="270" y="22" font-size="13" class="ink" font-weight="600">② the ECC breaks</text>
+        <rect x="274" y="36" width="170" height="44" class="accs"/>
+        <rect x="444" y="36" width="50" height="44" class="ambs"/>
+        <text x="359" y="62" font-size="12" class="ink" text-anchor="middle">data area</text>
+        <text x="469" y="56" font-size="10" class="ink" text-anchor="middle">spare</text>
+        <text x="469" y="70" font-size="10" class="ink mono" text-anchor="middle" font-weight="600">ECC</text>
+        <text x="274" y="98" font-size="11" class="ink2">one data bit 1 → 0 changes the parity</text>
+        <text x="274" y="114" font-size="11" class="stp">in many places, some of them 0 → 1</text>
+        <text x="274" y="130" font-size="11" class="mut">(ECC: error-correcting code, checked</text>
+        <text x="274" y="146" font-size="11" class="mut">on every read)</text>
+        <text x="530" y="22" font-size="13" class="ink" font-weight="600">③ every pulse leaks</text>
+        <rect x="534" y="36" width="40" height="20" rx="3" class="surf"/>
+        <rect x="584" y="36" width="40" height="20" rx="3" class="surf"/>
+        <rect x="634" y="36" width="40" height="20" rx="3" class="surf"/>
+        <rect x="684" y="36" width="40" height="20" rx="3" class="surf"/>
+        <rect x="534" y="62" width="40" height="20" rx="3" class="surf"/>
+        <rect x="584" y="62" width="40" height="20" rx="3" class="ambs"/>
+        <rect x="634" y="62" width="40" height="20" rx="3" class="surf"/>
+        <rect x="684" y="62" width="40" height="20" rx="3" class="surf"/>
+        <rect x="534" y="88" width="40" height="20" rx="3" class="surf"/>
+        <rect x="584" y="88" width="40" height="20" rx="3" class="surf"/>
+        <rect x="634" y="88" width="40" height="20" rx="3" class="surf"/>
+        <rect x="684" y="88" width="40" height="20" rx="3" class="surf"/>
+        <path d="M528 72 H740" style="stroke:var(--amber);stroke-width:1.6;opacity:.7"/>
+        <circle cx="554" cy="72" r="2.6" class="stp"/>
+        <circle cx="654" cy="72" r="2.6" class="stp"/>
+        <circle cx="704" cy="72" r="2.6" class="stp"/>
+        <circle cx="604" cy="46" r="2.6" class="stp"/>
+        <circle cx="604" cy="98" r="2.6" class="stp"/>
+        <text x="534" y="124" font-size="10" class="mut">amber: the cell being written</text>
+        <text x="534" y="140" font-size="11" class="stp">red: stray charge on its word line</text>
+        <text x="534" y="156" font-size="11" class="stp">and the next ones (program disturb)</text>
+        <path d="M16 168 H744" class="ln"/>
+        <text x="16" y="190" font-size="12" class="ink" font-weight="600">④ in TLC one cell holds three pages: rewriting one moves the level the other two read</text>
+        <rect x="20" y="202" width="112" height="24" class="accs"/>
+        <text x="76" y="218" font-size="11" class="ink" text-anchor="middle">lower page</text>
+        <rect x="140" y="202" width="112" height="24" class="ambs"/>
+        <text x="196" y="218" font-size="11" class="ink" text-anchor="middle">middle page</text>
+        <rect x="260" y="202" width="112" height="24" class="vios"/>
+        <text x="316" y="218" font-size="11" class="ink" text-anchor="middle">upper page</text>
+        <text x="380" y="218" font-size="11" class="ink2">→ one level per cell: 3 bits in one charge</text>
+        <rect x="16" y="240" width="728" height="54" rx="6" class="vios"/>
+        <text x="28" y="262" font-size="12" class="ink" font-weight="600">The rule in the datasheets: NOP (number of partial programs per page) = 1 for MLC and TLC.</text>
+        <text x="28" y="282" font-size="11" class="ink2">Old SLC chips allowed up to 4, each into a still-erased part of the page (a 512-byte sector with its own ECC).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 6. Why the chip allows one program per page between erases. ① A second program cannot write arbitrary data. ② Even a change it could make would break the page’s ECC. ③ Each extra pulse adds stray charge to cells it did not choose. ④ In MLC and TLC, rewriting one page moves cells that other pages share. Hence OSTEP’s “Program(0) on a VALID page → error”.</p>
+  </div>
+
+
+  <p>A flash chip offers exactly three operations, and they are not symmetric. <b>Read</b> takes a page number and returns that page. <b>Erase</b> takes a block and sets every bit of every page in it to 1, destroying whatever the block held. <b>Program</b> takes an erased page and writes data into it, but it can only change 1s into 0s. <span class="src">OSTEP 44.3</span></p>
+  <p>These two rules force everything else. Writing a new value into a page that already holds data would need some bits to go from 0 back to 1, and only an erase can do that. An erase, though, works on a whole block. So a page, once programmed, cannot be programmed again until its entire block has been erased. <span class="src">OSTEP 44.3</span></p>
+  <p>OSTEP keeps track of this with a state per page (Figure 4, top). A page starts <b>INVALID</b> (i): its contents are unknown and it cannot be programmed. Erasing its block makes it <b>ERASED</b> (E), ready to program. Programming it makes it <b>VALID</b> (V), and only then should it be read. Programming a VALID page a second time is an error. The only way back to ERASED is to erase the whole block, which resets every page in it. <span class="src">OSTEP 44.3</span></p>
+  <p>Figure 4, bottom, runs OSTEP's example with unrealistically small 8-bit pages. ① A 4-page block holds four VALID pages, and the client wants page 0 to become 00000011. ② The block must be erased first, and the erase sets all 32 bits to 1, in all four pages. ③ Programming page 0 now works; it turns exactly the needed 1s into 0s. But pages 1, 2 and 3 are gone. To change one page without losing its neighbours, the neighbours must first be copied somewhere else, into memory or into another block. <span class="src">OSTEP 44.3, "A Detailed Example"</span></p>
+  <p>This is the root of chapter 44. On a hard disk, "write sector n" was one operation on one unit (page ①, §3). On flash it becomes two operations on two different sizes: erase a large block, then program a small page, once.</p>
+  <p>Video 3 shows the same asymmetry in the hardware. ① Erasing pulls all the trapped charge out, and the cell reads 111, the all-1s state of an erased page. Programming can only add charge, and only an erase removes it: the one-way rule of this section in physical form. ② For reading or programming, one row selector and one layer selector light a single page, but an erase clears every page of the block at once. The video says “erase the contents of a memory cell”, as if one cell could be erased alone. The creator's own note corrects it: to erase one page, the surrounding pages are moved elsewhere and the entire block is erased. That is Figure 4's example, and the garbage collection of page ③. <span class="src">Branch Education 7:42–7:58, 10:58–11:55; creator's notes 10:31–10:50</span></p>
+  <p>Figure 5 shows what the three operations do to the cells, and with it why an erase gives 1s and why program goes only one way. ① A read puts a read voltage on the chosen word line and a higher pass voltage on all the others, so every other cell of a string conducts whatever it holds. Current then flows down the string only if the chosen cell conducts as well. An empty cell conducts and reads as 1. Trapped electrons raise the voltage a cell needs before it conducts, so a charged cell blocks the current and reads as 0. An erased page is empty, so it reads all 1s: the 1 is the empty state, not a value the erase writes. ② A program puts about 20 V on the chosen word line, and under it electrons tunnel from the channel into the charge trap. The choice is made cell by cell through the bitlines: a string held at 0 V is programmed, while a string held high lifts its own channel's voltage, which cancels the pull and keeps the electrons out. A gate at a strong positive voltage can only pull electrons in, so program can only add charge, and adding charge only turns 1s into 0s. ③ An erase reverses the field. The word lines go to 0 V and about 20 V goes onto the body under the strings, which pushes the electrons back out. That body is shared by every string of the block, so every cell of the block empties at once. Shielding the other pages of each string from that voltage is possible only at extra cost and stress, so chips erase whole blocks. <span class="src">OSTEP 44.1, 44.3; Branch Education 7:06–7:58</span></p>
+  <p>④ The same question, asked at seven read voltages, gives a TLC cell its three bits. An empty cell conducts at all seven and a full one at none, and the video labels the levels by that count, from 111 for empty to 000 for full: that is why more charge reads as a smaller number. Real chips assign the bit patterns in Gray code instead, so that neighbouring levels differ in one bit and a small drift in charge costs one bit error, not several. <span class="src">Branch Education 7:06–7:20</span></p>
+  <p>Figure 6 answers why the chip allows only one program per page between erases, even though a second one could still clear bits. ① New data is an arbitrary bit pattern, and almost any pattern needs some 0 to become 1, which only an erase does. ② Even a change that only clears bits breaks the page. Each page carries an error-correcting code (ECC) in its spare bytes, computed over the whole page and checked on every read. Changing one data bit changes the code in many places, some of them from 0 to 1. ③ Every program pulse puts a high voltage on cells it did not choose, and the protected cells on the same word line and the cells on the word lines beside it gain a little stray charge. OSTEP calls this program disturb, and it is why SSDs program the pages of a block once each, in order, from low to high. ④ In MLC and TLC one cell carries bits of two or three pages, so reprogramming one page would move cells whose level the other pages also read. NAND datasheets state the rule as NOP, the number of partial programs allowed per page: 1 for MLC and TLC. Old SLC chips allowed up to 4, but each partial program filled a different, still-erased part of the page, such as one 512-byte sector with its own ECC, so no bit was programmed twice. OSTEP's model keeps only the rule: programming a VALID page is an error. <span class="src">OSTEP 44.3–44.5</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>Empty cells conduct, so they read 1, and an erase empties a whole block through the body its strings share. Program pulls charge into chosen cells of one page, turning 1s into 0s, once per page; a second pass would break the page's ECC and disturb its neighbours. So a page cannot be rewritten in place: changing it means erasing its whole block, after rescuing the other pages in it.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>How long does each operation take, and how long does a block last?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-time">
+    <div class="scroll">
+      <svg viewBox="0 0 760 270" width="760" role="img" aria-label="Log-scale time bars: flash read, program, erase, and a hard-disk random read">
+        <g class="ln"><path d="M210 30 V200"/><path d="M355 30 V200"/><path d="M500 30 V200"/><path d="M645 30 V200"/></g>
+        <g font-size="11" class="mono mut" text-anchor="middle"><text x="210" y="220">10 µs</text><text x="355" y="220">100 µs</text><text x="500" y="220">1 ms</text><text x="645" y="220">10 ms</text></g>
+        <text x="200" y="56" font-size="13" class="ink" text-anchor="end">flash read (page)</text>
+        <rect x="268" y="42" width="69" height="22" class="accs"/>
+        <text x="344" y="58" font-size="11" class="mut">25–75 µs</text>
+        <text x="200" y="96" font-size="13" class="ink" text-anchor="end">flash program (page)</text>
+        <rect x="399" y="82" width="120" height="22" class="accs"/>
+        <text x="526" y="98" font-size="11" class="mut">200–1350 µs</text>
+        <text x="200" y="136" font-size="13" class="ink" text-anchor="end">flash erase (block)</text>
+        <rect x="526" y="122" width="69" height="22" class="stps"/>
+        <text x="602" y="138" font-size="11" class="mut">1.5–4.5 ms</text>
+        <text x="200" y="182" font-size="13" class="ink" text-anchor="end">hard disk, random 4 KB</text>
+        <rect x="613" y="168" width="50" height="22" class="ambs"/>
+        <text x="604" y="164" font-size="11" class="mut" text-anchor="end">6 ms (Cheetah) – 13 ms (Barracuda)</text>
+        <text x="210" y="244" font-size="12" class="ink2">A flash read is about 100× quicker than a hard-disk random read;</text>
+        <text x="210" y="262" font-size="12" class="ink2">an erase costs about as much as a hard-disk seek.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 7. The three flash operations and one hard-disk random read on one log-scale axis, where each grid line is ten times the one before. Ranges span SLC to TLC. The red bar sets the design goal: keep erases rare, and keep them out of the path of a client's write.</p>
+  </div>
+
+  <div class="figure" id="fig-cycles">
+    <div class="scroll">
+      <svg viewBox="0 0 760 398" width="760" role="img" aria-label="Log-scale bars in CPU cycles at 3 GHz: L1, L2 and L3 cache hits and a DRAM access under 300 cycles; a flash page read near 100 thousand; a program near a million; an erase near ten million; a hard-disk random read near twenty to forty million. A dashed line near ten thousand cycles separates hardware stalls from OS thread switches">
+        <text x="16" y="20" font-size="12" class="mut">cycles of a 3 GHz CPU (1 ns = 3 cycles · 1 µs = 3,000 · 1 ms = 3,000,000), log scale</text>
+        <g class="ln"><path d="M230.0 50 V344"/><path d="M292.0 50 V344"/><path d="M354.0 50 V344"/><path d="M416.0 50 V344"/><path d="M478.0 50 V344"/><path d="M540.0 50 V344"/><path d="M602.0 50 V344"/><path d="M664.0 50 V344"/><path d="M726.0 50 V344"/></g>
+        <g font-size="11" class="mono mut" text-anchor="middle"><text x="230.0" y="360">1</text><text x="292.0" y="360">10</text><text x="354.0" y="360">100</text><text x="416.0" y="360">1k</text><text x="478.0" y="360">10k</text><text x="540.0" y="360">100k</text><text x="602.0" y="360">1M</text><text x="664.0" y="360">10M</text><text x="726.0" y="360">100M</text></g>
+        <text x="216" y="71" font-size="12" class="ink" text-anchor="end">L1 cache hit</text>
+        <rect x="267.3" y="56" width="6.0" height="20" class="vios"/>
+        <text x="281.3" y="71" font-size="11" class="mut">≈ 4</text>
+        <text x="216" y="107" font-size="12" class="ink" text-anchor="end">L2 cache hit</text>
+        <rect x="296.9" y="92" width="4.2" height="20" class="vios"/>
+        <text x="309.1" y="107" font-size="11" class="mut">≈ 12</text>
+        <text x="216" y="143" font-size="12" class="ink" text-anchor="end">L3 cache hit</text>
+        <rect x="329.3" y="128" width="15.1" height="20" class="vios"/>
+        <text x="352.4" y="143" font-size="11" class="mut">≈ 40–70</text>
+        <text x="216" y="179" font-size="12" class="ink" text-anchor="end">DRAM (cache miss)</text>
+        <rect x="377.6" y="164" width="6.0" height="20" class="vios"/>
+        <text x="369.6" y="179" font-size="11" class="mut" text-anchor="end">240–300 (80–100 ns)</text>
+        <text x="216" y="215" font-size="12" class="ink" text-anchor="end">flash read (page)</text>
+        <rect x="532.3" y="200" width="29.6" height="20" class="accs"/>
+        <text x="569.8" y="215" font-size="11" class="mut">75k–225k (25–75 µs)</text>
+        <text x="216" y="251" font-size="12" class="ink" text-anchor="end">flash program (page)</text>
+        <rect x="588.2" y="236" width="51.4" height="20" class="accs"/>
+        <text x="580.2" y="251" font-size="11" class="mut" text-anchor="end">0.6M–4M (200–1,350 µs)</text>
+        <text x="216" y="287" font-size="12" class="ink" text-anchor="end">flash erase (block)</text>
+        <rect x="642.5" y="272" width="29.6" height="20" class="stps"/>
+        <text x="634.5" y="287" font-size="11" class="mut" text-anchor="end">4.5M–13.5M (1.5–4.5 ms)</text>
+        <text x="216" y="323" font-size="12" class="ink" text-anchor="end">disk random 4 KB</text>
+        <rect x="679.8" y="308" width="21.2" height="20" class="ambs"/>
+        <text x="671.8" y="323" font-size="11" class="mut" text-anchor="end">18M–40M (6–13 ms)</text>
+        <path d="M478.0 34 V336" style="stroke:var(--violet);stroke-width:1.6;stroke-dasharray:5 3"/>
+        <text x="472.0" y="44" font-size="11" class="vio" text-anchor="end">← the core stalls and waits</text>
+        <text x="484.0" y="44" font-size="11" class="vio">the OS sleeps the thread and runs another →</text>
+        <text x="16" y="386" font-size="12" class="ink2">A flash read ≈ 300–900 DRAM misses. A disk random read ≈ 80–500 flash reads. An erase ≈ 15,000–50,000 DRAM misses.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 8. Figure 7’s times in CPU cycles, under the memory hierarchy you know (violet: typical values for a recent desktop x86 core, they vary by chip; teal and red: flash, OSTEP Figure 44.2; amber: page ①’s two disks). Left of the dashed line the core waits out a miss in hardware; to the right a wait is long enough that the OS switches to another thread, which itself costs a few µs, about 10,000 cycles.</p>
+  </div>
+
+  <div class="figure" id="fig-wear">
+    <div class="scroll">
+      <svg viewBox="0 0 760 740" width="760" role="img" aria-label="Five panels: one cell sliced into gate, thick insulator, charge trap, thin insulator and channel, new and after many program/erase cycles with electrons stuck in its thin insulator; the voltage ranges of 1 and 0 cells, narrow when new and overlapping when worn; a read putting pass voltage on the other word lines so charge creeps in; and pages programmed in order, each shaken once, against any order, where a page is shaken from both sides; and below, the three ways an SSD copes with wear, each linked to the section that explains it">
+        <defs><marker id="h9y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker><marker id="h9w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="amb"/></marker></defs>
+        <text x="16" y="20" font-size="13" class="ink" font-weight="600">① wear: charge stuck in the insulator</text>
+        <rect x="24" y="32" width="90" height="16" class="surf"/>
+        <rect x="24" y="48" width="90" height="16" class="surf"/>
+        <rect x="24" y="64" width="90" height="20" class="ambs"/>
+        <rect x="24" y="84" width="90" height="10" class="surf"/>
+        <rect x="24" y="94" width="90" height="16" class="surf"/>
+        <rect x="266" y="32" width="90" height="16" class="surf"/>
+        <rect x="266" y="48" width="90" height="16" class="surf"/>
+        <rect x="266" y="64" width="90" height="20" class="ambs"/>
+        <rect x="266" y="84" width="90" height="10" class="surf"/>
+        <rect x="266" y="94" width="90" height="16" class="surf"/>
+        <g font-size="10" text-anchor="middle"><text x="190" y="44" class="mut">gate</text><text x="190" y="60" class="mut">insulator (thick)</text><text x="190" y="78" class="amb" font-weight="600">trap: holds the e⁻</text><text x="190" y="93" class="mut">insulator (thin)</text><text x="190" y="106" class="mut">channel</text></g>
+        <path d="M36 104 V68" style="stroke:var(--amber);stroke-width:1.6" marker-start="url(#h9w)" marker-end="url(#h9w)"/>
+        <g class="ink"><circle cx="58" cy="74" r="2.4"/><circle cx="78" cy="74" r="2.4"/><circle cx="98" cy="74" r="2.4"/><circle cx="296" cy="74" r="2.4"/><circle cx="316" cy="74" r="2.4"/><circle cx="336" cy="74" r="2.4"/></g>
+        <g class="stp"><circle cx="278" cy="89" r="2.4"/><circle cx="298" cy="89" r="2.4"/><circle cx="322" cy="89" r="2.4"/><circle cx="344" cy="89" r="2.4"/></g>
+        <text x="69" y="126" font-size="11" class="ink2" text-anchor="middle">new</text>
+        <text x="311" y="126" font-size="11" class="stp" text-anchor="middle">after many P/E cycles:</text>
+        <text x="311" y="140" font-size="11" class="stp" text-anchor="middle">stuck electrons (red)</text>
+        <g font-size="10.5" class="ink2"><text x="16" y="164">Insulators keep the electrons in the trap with the power off.</text><text x="16" y="178">Only the thin one gives way, at ≈20 V (amber arrow):</text><text x="16" y="192">program pushes electrons in, erase pulls them out.</text><text x="16" y="210" class="ink" font-weight="600">P/E cycle = one program + one erase of the block.</text><text x="16" y="228">Each cycle wears the thin layer, and a few electrons stay</text><text x="16" y="242">stuck in it (red), which an erase does not reliably clear.</text></g>
+        <g transform="translate(0,124)">
+        <text x="16" y="156" font-size="13" class="ink" font-weight="600">② the two levels blur into each other</text>
+        <text x="52" y="192" font-size="11" class="mut">new</text>
+        <text x="52" y="250" font-size="11" class="mut">worn</text>
+        <path d="M44 264 V170" style="stroke:var(--ink-2);stroke-width:1.2" marker-end="url(#h9y)"/>
+        <text transform="translate(36,216) rotate(-90)" font-size="10" class="ink2" text-anchor="middle">number of cells</text>
+        <path d="M50.0 200.0 L55.2 200.0 L60.3 200.0 L65.5 200.0 L70.7 200.0 L75.8 200.0 L81.0 199.8 L86.2 199.4 L91.3 198.0 L96.5 195.0 L101.7 189.4 L106.8 181.4 L112.0 172.8 L117.2 166.9 L122.3 166.6 L127.5 172.0 L132.7 180.5 L137.8 188.7 L143.0 194.6 L148.2 197.8 L153.3 199.3 L158.5 199.8 L163.7 200.0 L168.8 200.0 L174.0 200.0 L179.2 200.0 L184.3 200.0 L189.5 200.0 L194.7 200.0 L199.8 200.0 L205.0 200.0 L210.2 200.0 L215.3 200.0 L220.5 200.0 L225.7 200.0 L230.8 200.0 L236.0 200.0 L241.2 200.0 L246.3 200.0 L251.5 200.0 L256.7 200.0 L261.8 200.0 L267.0 200.0 L272.2 200.0 L277.3 200.0 L282.5 200.0 L287.7 200.0 L292.8 200.0 L298.0 200.0 L303.2 200.0 L308.3 200.0 L313.5 200.0 L318.7 200.0 L323.8 200.0 L329.0 200.0 L334.2 200.0 L339.3 200.0 L344.5 200.0 L349.7 200.0 L354.8 200.0 L360.0 200.0" style="fill:none;stroke:var(--accent);stroke-width:1.6"/>
+        <path d="M50.0 200.0 L55.2 200.0 L60.3 200.0 L65.5 200.0 L70.7 200.0 L75.8 200.0 L81.0 200.0 L86.2 200.0 L91.3 200.0 L96.5 200.0 L101.7 200.0 L106.8 200.0 L112.0 200.0 L117.2 200.0 L122.3 200.0 L127.5 200.0 L132.7 200.0 L137.8 200.0 L143.0 200.0 L148.2 200.0 L153.3 200.0 L158.5 200.0 L163.7 200.0 L168.8 200.0 L174.0 200.0 L179.2 200.0 L184.3 200.0 L189.5 200.0 L194.7 200.0 L199.8 200.0 L205.0 200.0 L210.2 200.0 L215.3 200.0 L220.5 200.0 L225.7 200.0 L230.8 200.0 L236.0 200.0 L241.2 199.8 L246.3 199.3 L251.5 198.0 L256.7 194.9 L261.8 189.2 L267.0 181.1 L272.2 172.5 L277.3 166.8 L282.5 166.7 L287.7 172.3 L292.8 180.8 L298.0 189.0 L303.2 194.7 L308.3 197.9 L313.5 199.3 L318.7 199.8 L323.8 200.0 L329.0 200.0 L334.2 200.0 L339.3 200.0 L344.5 200.0 L349.7 200.0 L354.8 200.0 L360.0 200.0" style="fill:none;stroke:var(--accent);stroke-width:1.6"/>
+        <path d="M50.0 260.0 L55.2 260.0 L60.3 260.0 L65.5 260.0 L70.7 260.0 L75.8 260.0 L81.0 260.0 L86.2 260.0 L91.3 260.0 L96.5 260.0 L101.7 260.0 L106.8 260.0 L112.0 260.0 L117.2 260.0 L122.3 260.0 L127.5 260.0 L132.7 259.9 L137.8 259.9 L143.0 259.8 L148.2 259.7 L153.3 259.6 L158.5 259.3 L163.7 259.0 L168.8 258.5 L174.0 257.8 L179.2 257.0 L184.3 255.9 L189.5 254.5 L194.7 252.8 L199.8 250.8 L205.0 251.9 L210.2 253.7 L215.3 255.3 L220.5 256.5 L225.7 257.5 L230.8 258.2 L236.0 258.8 L241.2 259.2 L246.3 259.5 L251.5 259.7 L256.7 259.8 L261.8 259.9 L267.0 259.9 L272.2 260.0 L277.3 260.0 L282.5 260.0 L287.7 260.0 L292.8 260.0 L298.0 260.0 L303.2 260.0 L308.3 260.0 L313.5 260.0 L318.7 260.0 L323.8 260.0 L329.0 260.0 L334.2 260.0 L339.3 260.0 L344.5 260.0 L349.7 260.0 L354.8 260.0 L360.0 260.0 Z" style="fill:var(--stop);opacity:.4;stroke:none"/>
+        <path d="M50.0 259.6 L55.2 259.4 L60.3 259.1 L65.5 258.6 L70.7 258.0 L75.8 257.2 L81.0 256.2 L86.2 254.9 L91.3 253.2 L96.5 251.3 L101.7 249.1 L106.8 246.6 L112.0 243.9 L117.2 241.2 L122.3 238.5 L127.5 235.9 L132.7 233.7 L137.8 231.9 L143.0 230.6 L148.2 230.0 L153.3 230.1 L158.5 230.9 L163.7 232.3 L168.8 234.3 L174.0 236.6 L179.2 239.2 L184.3 242.0 L189.5 244.7 L194.7 247.3 L199.8 249.8 L205.0 251.9 L210.2 253.7 L215.3 255.3 L220.5 256.5 L225.7 257.5 L230.8 258.2 L236.0 258.8 L241.2 259.2 L246.3 259.5 L251.5 259.7 L256.7 259.8 L261.8 259.9 L267.0 259.9 L272.2 260.0 L277.3 260.0 L282.5 260.0 L287.7 260.0 L292.8 260.0 L298.0 260.0 L303.2 260.0 L308.3 260.0 L313.5 260.0 L318.7 260.0 L323.8 260.0 L329.0 260.0 L334.2 260.0 L339.3 260.0 L344.5 260.0 L349.7 260.0 L354.8 260.0 L360.0 260.0" style="fill:none;stroke:var(--accent);stroke-width:1.6"/>
+        <path d="M50.0 260.0 L55.2 260.0 L60.3 260.0 L65.5 260.0 L70.7 260.0 L75.8 260.0 L81.0 260.0 L86.2 260.0 L91.3 260.0 L96.5 260.0 L101.7 260.0 L106.8 260.0 L112.0 260.0 L117.2 260.0 L122.3 260.0 L127.5 260.0 L132.7 259.9 L137.8 259.9 L143.0 259.8 L148.2 259.7 L153.3 259.6 L158.5 259.3 L163.7 259.0 L168.8 258.5 L174.0 257.8 L179.2 257.0 L184.3 255.9 L189.5 254.5 L194.7 252.8 L199.8 250.8 L205.0 248.5 L210.2 245.9 L215.3 243.2 L220.5 240.5 L225.7 237.8 L230.8 235.3 L236.0 233.1 L241.2 231.5 L246.3 230.4 L251.5 230.0 L256.7 230.3 L261.8 231.2 L267.0 232.8 L272.2 234.8 L277.3 237.3 L282.5 239.9 L287.7 242.7 L292.8 245.4 L298.0 248.0 L303.2 250.3 L308.3 252.4 L313.5 254.2 L318.7 255.6 L323.8 256.8 L329.0 257.7 L334.2 258.4 L339.3 258.9 L344.5 259.3 L349.7 259.5 L354.8 259.7 L360.0 259.8" style="fill:none;stroke:var(--accent);stroke-width:1.6"/>
+        <path d="M50 200 H360 M50 260 H360" class="ln"/>
+        <path d="M200 160 V266" style="stroke:var(--violet);stroke-width:1.4;stroke-dasharray:4 3"/>
+        <text x="204" y="170" font-size="10" class="vio">read voltage</text>
+        <text x="120" y="214" font-size="10" class="ink2" text-anchor="middle">1 (empty)</text>
+        <text x="280" y="214" font-size="10" class="ink2" text-anchor="middle">0 (charged)</text>
+        <text x="360" y="280" font-size="10" class="ink2" text-anchor="end">gate voltage at which a cell switches on →</text>
+        <g font-size="10.5" class="ink2"><text x="16" y="302">Left hump widens right: erased cells keep stuck electrons (①).</text><text x="16" y="316">Right hump widens left: charged cells leak through the damage.</text></g>
+        <text x="16" y="336" font-size="11" class="stp">red overlap: cells on the wrong side, read as the wrong bit.</text>
+        <text x="16" y="352" font-size="11" class="ink2">ECC fixes a few; past that, the block is retired.</text>
+        </g>
+        <path d="M380 10 V482" class="ln"/>
+        <text x="396" y="20" font-size="13" class="ink" font-weight="600">③ read disturb</text>
+        <rect x="402" y="32" width="40" height="16" rx="3" class="surf"/>
+        <text x="448" y="44" font-size="10" class="mut">V<tspan font-size="8">pass</tspan></text>
+        <circle cx="434" cy="40" r="2.2" class="stp"/>
+        <rect x="402" y="52" width="40" height="16" rx="3" class="surf"/>
+        <text x="448" y="64" font-size="10" class="mut">V<tspan font-size="8">pass</tspan></text>
+        <circle cx="434" cy="60" r="2.2" class="stp"/>
+        <rect x="402" y="72" width="40" height="16" rx="3" class="ambs"/>
+        <text x="448" y="84" font-size="10" class="amb">V<tspan font-size="8">read</tspan></text>
+        <rect x="402" y="92" width="40" height="16" rx="3" class="surf"/>
+        <text x="448" y="104" font-size="10" class="mut">V<tspan font-size="8">pass</tspan></text>
+        <circle cx="434" cy="100" r="2.2" class="stp"/>
+        <rect x="402" y="112" width="40" height="16" rx="3" class="surf"/>
+        <text x="448" y="124" font-size="10" class="mut">V<tspan font-size="8">pass</tspan></text>
+        <circle cx="434" cy="120" r="2.2" class="stp"/>
+        <text x="496" y="42" font-size="11" class="ink2">every read puts V<tspan font-size="8">pass</tspan> on all the other</text>
+        <text x="496" y="58" font-size="11" class="ink2">word lines, and a little charge creeps</text>
+        <text x="496" y="74" font-size="11" class="ink2">into those cells (red). One read: no harm.</text>
+        <text x="496" y="90" font-size="11" class="stp">Many thousands on one block: bits flip,</text>
+        <text x="496" y="106" font-size="11" class="ink2">so controllers count reads and copy</text>
+        <text x="496" y="122" font-size="11" class="ink2">a heavily read block somewhere fresh.</text>
+        <text x="396" y="156" font-size="13" class="ink" font-weight="600">④ why program in order</text>
+        <text x="402" y="174" font-size="11" class="acc" font-weight="600">in order (low → high)</text>
+        <text x="572" y="174" font-size="11" class="stp" font-weight="600">any order</text>
+        <rect x="402" y="267" width="64" height="14" rx="2" class="surf"/>
+        <text x="408" y="278" font-size="10" class="ink mono">p0</text>
+        <text x="460" y="278" font-size="9" class="mut mono" text-anchor="end">1st</text>
+        <rect x="402" y="250" width="64" height="14" rx="2" class="surf"/>
+        <text x="408" y="261" font-size="10" class="ink mono">p1</text>
+        <text x="460" y="261" font-size="9" class="mut mono" text-anchor="end">2nd</text>
+        <rect x="402" y="233" width="64" height="14" rx="2" class="ambs"/>
+        <text x="408" y="244" font-size="10" class="ink mono">p2</text>
+        <text x="460" y="244" font-size="9" class="mut mono" text-anchor="end">3rd</text>
+        <rect x="402" y="216" width="64" height="14" rx="2" class="surf"/>
+        <text x="408" y="227" font-size="10" class="ink mono">p3</text>
+        <text x="460" y="227" font-size="9" class="mut mono" text-anchor="end">4th</text>
+        <rect x="402" y="199" width="64" height="14" rx="2" class="surf"/>
+        <text x="408" y="210" font-size="10" class="ink mono">p4</text>
+        <text x="460" y="210" font-size="9" class="mut mono" text-anchor="end">5th</text>
+        <rect x="402" y="182" width="64" height="14" rx="2" class="surf"/>
+        <text x="408" y="193" font-size="10" class="ink mono">p5</text>
+        <text x="460" y="193" font-size="9" class="mut mono" text-anchor="end">6th</text>
+        <rect x="572" y="267" width="64" height="14" rx="2" class="surf"/>
+        <text x="578" y="278" font-size="10" class="ink mono">p0</text>
+        <text x="630" y="278" font-size="9" class="mut mono" text-anchor="end">4th</text>
+        <rect x="572" y="250" width="64" height="14" rx="2" class="ambs"/>
+        <text x="578" y="261" font-size="10" class="ink mono">p1</text>
+        <text x="630" y="261" font-size="9" class="mut mono" text-anchor="end">1st</text>
+        <rect x="572" y="233" width="64" height="14" rx="2" class="surf"/>
+        <text x="578" y="244" font-size="10" class="ink mono">p2</text>
+        <text x="630" y="244" font-size="9" class="mut mono" text-anchor="end">6th</text>
+        <rect x="572" y="216" width="64" height="14" rx="2" class="surf"/>
+        <text x="578" y="227" font-size="10" class="ink mono">p3</text>
+        <text x="630" y="227" font-size="9" class="mut mono" text-anchor="end">2nd</text>
+        <rect x="572" y="199" width="64" height="14" rx="2" class="surf"/>
+        <text x="578" y="210" font-size="10" class="ink mono">p4</text>
+        <text x="630" y="210" font-size="9" class="mut mono" text-anchor="end">5th</text>
+        <rect x="572" y="182" width="64" height="14" rx="2" class="surf"/>
+        <text x="578" y="193" font-size="10" class="ink mono">p5</text>
+        <text x="630" y="193" font-size="9" class="mut mono" text-anchor="end">3rd</text>
+        <path d="M470 223 C 486 223, 486 240, 470 240" style="stroke:var(--amber);stroke-width:1.6;fill:none"/>
+        <text x="490" y="236" font-size="10" class="amb">once</text>
+        <path d="M640 240 C 656 240, 656 257, 640 257" style="stroke:var(--stop);stroke-width:1.6;fill:none"/>
+        <path d="M640 274 C 656 274, 656 257, 640 257" style="stroke:var(--stop);stroke-width:1.6;fill:none"/>
+        <text x="660" y="261" font-size="10" class="stp">twice, later</text>
+        <text x="402" y="300" font-size="10" class="ink2">each page shaken once,</text>
+        <text x="402" y="313" font-size="10" class="ink2">a known amount, corrected</text>
+        <text x="572" y="300" font-size="10" class="ink2">shaken from both sides,</text>
+        <text x="572" y="313" font-size="10" class="ink2">at unplanned times</text>
+        <path d="M16 500 H744" class="ln"/>
+        <text x="16" y="524" font-size="13" class="ink" font-weight="600">⑤ what the SSD does about wear (each round chip opens the section that explains it)</text>
+        <rect x="16" y="538" width="168" height="144" rx="6" class="stps"/>
+        <text x="26" y="558" font-size="12" class="ink" font-weight="600">The problem</text>
+        <g font-size="10.5" class="ink2"><text x="26" y="576">each block survives</text><text x="26" y="591">~10,000 erases (MLC).</text><text x="26" y="606">Fixed mapping: a page</text><text x="26" y="621">rewritten 10× a second</text><text x="26" y="636">kills its block in ~17 min.</text></g>
+        <a href="#s6"><rect x="26" y="652" width="52" height="20" rx="10" class="surf"/><text x="52" y="666" font-size="11" class="acc" font-weight="600" text-anchor="middle">② §6</text></a>
+        <path d="M186 610 H196" class="arr" marker-end="url(#h9y)"/>
+        <rect x="200" y="538" width="176" height="144" rx="6" class="accs"/>
+        <text x="210" y="558" font-size="12" class="ink" font-weight="600">a. erase less</text>
+        <g font-size="10.5" class="ink2"><text x="210" y="576">Write each new version to a</text><text x="210" y="591">fresh page; erase only when</text><text x="210" y="606">GC reclaims a block. Lower</text><text x="210" y="621">WA = fewer erases.</text></g>
+        <a href="#s7"><rect x="210" y="652" width="52" height="20" rx="10" class="surf"/><text x="236" y="666" font-size="11" class="acc" font-weight="600" text-anchor="middle">② §7</text></a>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3"><rect x="270" y="652" width="72" height="20" rx="10" class="surf"/><text x="306" y="666" font-size="11" class="acc" font-weight="600" text-anchor="middle">③ §3–§4</text></a>
+        <rect x="384" y="538" width="176" height="144" rx="6" class="accs"/>
+        <text x="394" y="558" font-size="12" class="ink" font-weight="600">b. spread the erases</text>
+        <g font-size="10.5" class="ink2"><text x="394" y="576">Count erases per block and</text><text x="394" y="591">write to the least worn.</text><text x="394" y="606">Move cold data off fresh</text><text x="394" y="621">blocks so they rejoin.</text></g>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s8"><rect x="394" y="652" width="52" height="20" rx="10" class="surf"/><text x="420" y="666" font-size="11" class="acc" font-weight="600" text-anchor="middle">③ §8</text></a>
+        <rect x="568" y="538" width="176" height="144" rx="6" class="accs"/>
+        <text x="578" y="558" font-size="12" class="ink" font-weight="600">c. catch what is left</text>
+        <g font-size="10.5" class="ink2"><text x="578" y="576">ECC fixes a few bad bits per</text><text x="578" y="591">page. A block past that is</text><text x="578" y="606">retired; hidden spare flash</text><text x="578" y="621">takes its place.</text></g>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4"><rect x="578" y="652" width="52" height="20" rx="10" class="surf"/><text x="604" y="666" font-size="11" class="acc" font-weight="600" text-anchor="middle">③ §4</text></a>
+        <text x="16" y="704" font-size="12" class="ink mono">data a drive can take over its life ≈ capacity × P/E cycles ÷ WA</text>
+        <text x="16" y="724" font-size="11" class="ink2">Fixed mapping: a hot block dies in ~17 minutes. With a, b and c: a 1 TB TLC drive is rated ≈ 600 TB written (TBW).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 9. The two lifetime limits of this section. Left, wear: ① one cell, sliced: the trap holds the electrons between two insulators, and every program/erase (P/E) cycle drags electrons through the thin one at ≈20 V, leaving a few stuck in it; ② each row counts the cells at each switch-on voltage; stuck electrons push the 1s right and leaks pull the 0s left, until the two humps overlap. Right, disturbance: ③ a read leaks a little charge into the cells it passes over; ④ programming in order shakes each finished page exactly once. Bottom: ⑤ what the SSD does about wear; each round chip links to the section that explains that fix.</p>
+  </div>
+
+  <p>Reading a page takes tens of microseconds: 25 µs on SLC, 50 on MLC, about 75 on TLC (Figure 7). That is roughly a hundred times faster than a hard disk's random read, and it barely depends on where the page is or where the previous request went. Flash is therefore a <b>random-access</b> device, like memory and unlike a disk. <span class="src">OSTEP 44.3–44.4, Figure 44.2</span></p>
+  <p>Programming a page takes hundreds of microseconds, from 200–300 µs on SLC up to about 900–1,350 µs on TLC. One chip writing one page at a time would be slow, so SSDs program many chips in parallel to reach good write bandwidth. <span class="src">OSTEP 44.4</span></p>
+  <p>Erasing a block takes milliseconds: 1.5–2 ms on SLC, about 4.5 ms on TLC. That is the size of a hard-disk seek, the very cost the SSD was supposed to remove. The design goal for everything that follows comes from this bar: erase rarely, and never make a client's write wait for an erase. <span class="src">OSTEP 44.4</span></p>
+  <p>In CPU cycles the same times read as the memory hierarchy continued downwards (Figure 8). At 3 GHz one microsecond is 3,000 cycles. An L1 hit is about 4 cycles and a DRAM access about 300. A flash page read is 75,000–225,000 cycles, the cost of 300–900 DRAM misses; a program is about a million cycles; an erase is about ten million, the size of a hard disk's random read at 18–40 million. A cache miss is short enough that the core simply stalls until the data arrives. A flash read is not: the thread that issued it gives up the core and the OS runs another thread, because a switch costs a few microseconds while the read costs tens. For the fastest SSDs that boundary blurs, and kernels sometimes poll the device instead of sleeping. <span class="src">Cache and DRAM: typical values for recent desktop x86 cores; flash: OSTEP Figure 44.2; polling versus interrupts: OSTEP 36</span></p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>OPERATION</th><th>UNIT</th><th>SLC · MLC · TLC (µs)</th><th>CYCLES AT 3 GHZ</th><th>WHAT IT DOES</th></tr></thead>
+      <tbody>
+        <tr><td><b>Read</b></td><td>page</td><td class="c">25 · 50 · ~75</td><td class="c">75k · 150k · ~225k</td><td>Returns the page; time hardly depends on position.</td></tr>
+        <tr><td><b>Program</b></td><td>page</td><td class="c">200–300 · 600–900 · ~900–1350</td><td class="c">0.6–0.9M · 1.8–2.7M · ~2.7–4M</td><td>Writes an ERASED page by turning some 1s into 0s. Once per erase.</td></tr>
+        <tr><td><b>Erase</b></td><td>block</td><td class="c">1500–2000 · ~3000 · ~4500</td><td class="c">4.5–6M · ~9M · ~13.5M</td><td>Sets every bit of every page in the block to 1.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src" style="white-space:normal">OSTEP Figure 44.2 (numbers from AnandTech, 2012)</p>
+
+  <p><b>Wear.</b> Each program/erase cycle leaves a little extra charge trapped in the cells. As it builds up, a 0 gets harder to tell from a 1, and at some point the block can no longer be used. Manufacturers rate MLC blocks at about 10,000 program/erase (P/E) cycles and SLC blocks at about 100,000, though measurements have found real lifetimes longer than rated. A block is a consumable: every erase spends some of it. <span class="src">OSTEP 44.4</span></p>
+  <p>Figure 9, left, shows where the extra charge goes. ① Program and erase both drive electrons through a thin insulator at high voltage. Each pass damages the insulator a little, and some electrons stay stuck in it, and an erase does not reliably clear them. ② Figure 9 ② counts the cells at each switch-on voltage, one hump for the 1s and one for the 0s. The stuck charge raises the switch-on voltage of erased cells, and the damaged insulator lets charged cells leak electrons, which lowers theirs. Every cell is hit by a different amount, so both humps widen toward each other. Once the two ranges overlap, some cells fall on the wrong side of the read voltage and their bits read wrong. The page's ECC repairs a few such bits; when the errors pass what it can repair, the block is retired. TLC wears out sooner, in a few thousand cycles, because its eight ranges are narrow to begin with. This is the lifetime half of write amplification (Figure 11, ④) and the reason for wear leveling on page ③. <span class="src">OSTEP 44.4 (the extra charge); where it sits and the TLC figure: beyond OSTEP</span></p>
+  <p><b>What the SSD does about it.</b> Wear is physics and cannot be removed, so the SSD works around it in three ways (Figure 9, ⑤). <b>a. It erases less.</b> The log-structured FTL writes each new version of a page to a fresh page, so a write no longer costs an erase; erases happen only when garbage collection reclaims a block (<a href="#s7">§7</a>). The live pages that collection has to copy are write amplification, and the lower it is, the fewer erases (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">③ §3–§4</a>). <b>b. It spreads the erases.</b> The FTL counts erases per block and writes to the least-worn blocks. Blocks holding cold data are never erased, so now and then the FTL moves that data onto a worn block and puts the fresh one back into use (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s8">③ §8</a>). <b>c. It catches what is left.</b> ECC repairs a few bad bits per page; a block past that is retired, and hidden spare flash takes its place (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">③ §4</a>, overprovisioning). Without these, the fixed mapping of <a href="#s6">§6</a> erases a block on every rewrite: a page rewritten ten times a second spends a 10,000-erase block in about 17 minutes. With them, a drive can take about capacity × P/E cycles ÷ WA of writes over its life. Makers state this as TBW (terabytes written): about 600 TB for a typical 1 TB TLC drive. <span class="src">OSTEP 44.6 (fixed mapping wears blocks out), 44.10 (wear leveling); the 17 minutes, the formula, TBW and spare blocks: beyond OSTEP</span></p>
+  <p><b>Disturbance.</b> Reading or programming one page can flip bits in neighbouring pages; these are called read disturbs and program disturbs. To limit program disturbance, SSDs program the pages of an erased block in order, from the lowest page to the highest. <span class="src">OSTEP 44.4–44.5</span></p>
+  <p>Figure 9, right, shows both. ③ A read puts the pass voltage on every other word line of the block (Figure 5, ①), so each read lets a tiny amount of charge creep into cells it did not ask for. One read does no harm. Many thousands of reads of one block can flip bits, so controllers count reads per block and copy a heavily read block somewhere fresh before that happens. A program, at about 20 V, does the same thing harder (Figure 6, ③). ④ Programming a page also shifts the page next to it slightly. Written in order, from low to high, each finished page is shifted once, when the page above it is written, by an amount the chip expects and corrects for. Written in any order, a finished page can be shifted from both sides, at times nobody planned for. Of disturbance, one rule is carried forward: within a block, pages are programmed in order, which the log-structured FTL of §7 does naturally. <span class="src">OSTEP 44.4–44.5; read counting and the in-order correction: beyond OSTEP</span></p>
+  <p>A hard disk has none of these limits. It fails mechanically, the worst case being a head crash, where the head touches the surface, but rewriting a sector a million times costs it nothing. <span class="src">OSTEP 44.4</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Read: tens of µs, about 100,000 cycles or hundreds of DRAM misses, anywhere (random access). Program: hundreds of µs. Erase: milliseconds, as slow as a seek. A block survives about 10,000 erases (MLC), because charge stuck in its insulator blurs 1s and 0s. So erase rarely, and spread the erases over all blocks. Of disturbance, keep one rule: program a block's pages in order.</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="n">§5</span><h2>How does an SSD make flash chips look like a disk?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-inside">
+    <div class="scroll">
+      <svg viewBox="0 0 760 210" width="760" role="img" aria-label="Logical diagram of an SSD: the file system sends sector reads and writes to the interface logic; the controller with its memory drives many flash chips">
+        <defs>
+          <marker id="h2d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker>
+        </defs>
+        <rect x="8" y="76" width="120" height="58" rx="6" class="surf"/>
+        <text x="20" y="100" font-size="12" class="ink" font-weight="600">File system</text>
+        <text x="20" y="118" font-size="11" class="ink2">in the OS</text>
+        <path d="M128 105 L226 105" class="arr" marker-end="url(#h2d)"/>
+        <text x="176" y="96" font-size="10" class="mono ink2" text-anchor="middle">read/write</text>
+        <text x="176" y="124" font-size="10" class="mono ink2" text-anchor="middle">sector n</text>
+        <rect x="200" y="10" width="552" height="190" rx="10" class="ln" stroke-dasharray="5 4"/>
+        <text x="212" y="28" font-size="11" class="mut">SSD</text>
+        <rect x="228" y="76" width="104" height="58" rx="6" class="surf"/>
+        <text x="238" y="100" font-size="12" class="ink" font-weight="600">Interface</text>
+        <text x="238" y="118" font-size="11" class="ink2">sector array</text>
+        <path d="M332 96 L352 84" class="arr" marker-end="url(#h2d)"/>
+        <rect x="354" y="44" width="156" height="66" rx="6" class="accs"/>
+        <text x="366" y="68" font-size="12" class="ink" font-weight="600">Controller</text>
+        <text x="366" y="86" font-size="11" class="ink2">runs the FTL</text>
+        <rect x="354" y="128" width="156" height="58" rx="6" class="ambs"/>
+        <text x="366" y="152" font-size="12" class="ink" font-weight="600">Memory</text>
+        <text x="366" y="170" font-size="11" class="ink2">the map, buffers</text>
+        <path d="M432 110 L432 126" class="arr" marker-end="url(#h2d)" marker-start="url(#h2d)"/>
+        <g class="surf">
+          <rect x="560" y="30" width="80" height="44" rx="4"/><rect x="656" y="30" width="80" height="44" rx="4"/>
+          <rect x="560" y="84" width="80" height="44" rx="4"/><rect x="656" y="84" width="80" height="44" rx="4"/>
+          <rect x="560" y="138" width="80" height="44" rx="4"/><rect x="656" y="138" width="80" height="44" rx="4"/>
+        </g>
+        <g font-size="11" class="ink2" text-anchor="middle">
+          <text x="600" y="57">flash</text><text x="696" y="57">flash</text><text x="600" y="111">flash</text><text x="696" y="111">flash</text><text x="600" y="165">flash</text><text x="696" y="165">flash</text>
+        </g>
+        <path d="M510 70 L556 52" class="arr" marker-end="url(#h2d)"/>
+        <path d="M510 78 L556 106" class="arr" marker-end="url(#h2d)"/>
+        <path d="M510 86 L556 158" class="arr" marker-end="url(#h2d)"/>
+      </svg>
+    </div>
+    <p class="cap">Figure 10. What the board of Figure 1 does (OSTEP Figure 44.3, redrawn). Outside: the same sector array as a hard disk. Inside: a controller running the FTL, memory for its map, and many flash chips used in parallel.</p>
+  </div>
+
+  <div class="figure" id="fig-wa">
+    <div class="scroll">
+      <svg viewBox="0 0 760 306" width="760" role="img" aria-label="Left: the client writes 4 KB, the FTL programs 16 KB, one new page and three old pages moved along, so write amplification is 4. Right: the write waits for four programs instead of one, and a drive that can program 10,000 TB in its life gives the client 2,500 TB at write amplification 4 and spends 7,500 TB on moved pages">
+        <text x="16" y="22" font-size="13" class="ink" font-weight="600">① the client asks to write</text>
+        <rect x="20" y="34" width="70" height="30" class="ambs"/>
+        <text x="55" y="54" font-size="12" class="ink mono" text-anchor="middle">4 KB</text>
+        <text x="100" y="54" font-size="12" class="ink2">new data</text>
+        <text x="16" y="96" font-size="13" class="ink" font-weight="600">② the FTL programs into flash</text>
+        <rect x="20" y="108" width="70" height="30" class="ambs"/>
+        <text x="55" y="128" font-size="12" class="ink mono" text-anchor="middle">4 KB</text>
+        <rect x="92" y="108" width="70" height="30" class="accs"/>
+        <text x="127" y="128" font-size="12" class="ink mono" text-anchor="middle">4 KB</text>
+        <rect x="164" y="108" width="70" height="30" class="accs"/>
+        <text x="199" y="128" font-size="12" class="ink mono" text-anchor="middle">4 KB</text>
+        <rect x="236" y="108" width="70" height="30" class="accs"/>
+        <text x="271" y="128" font-size="12" class="ink mono" text-anchor="middle">4 KB</text>
+        <text x="55" y="156" font-size="11" class="amb" text-anchor="middle">new</text>
+        <path d="M92 146 V150 H306 V146" class="ln"/>
+        <text x="199" y="166" font-size="11" class="acc" text-anchor="middle">old pages moved along with it</text>
+        <text x="20" y="196" font-size="15" class="vio" font-weight="600">WA = 16 KB ÷ 4 KB = 4</text>
+        <text x="20" y="218" font-size="11" class="ink2">the extra 12 KB: a page cannot be overwritten (§3),</text>
+        <text x="20" y="234" font-size="11" class="ink2">so its old neighbours are rewritten too (Figure 12)</text>
+        <text x="20" y="250" font-size="11" class="mut">reads on the way do not count: they do not wear</text>
+        <path d="M372 12 V296" class="ln"/>
+        <text x="390" y="22" font-size="13" class="ink" font-weight="600">③ now: the write waits for every program</text>
+        <text x="390" y="52" font-size="12" class="ink mono">WA 1</text>
+        <rect x="440" y="38" width="60" height="20" class="ambs"/>
+        <text x="508" y="53" font-size="11" class="ink2">1 program</text>
+        <text x="390" y="82" font-size="12" class="ink mono">WA 4</text>
+        <rect x="440" y="68" width="60" height="20" class="ambs"/>
+        <rect x="500" y="68" width="60" height="20" class="accs"/>
+        <rect x="560" y="68" width="60" height="20" class="accs"/>
+        <rect x="620" y="68" width="60" height="20" class="accs"/>
+        <text x="390" y="108" font-size="11" class="ink2">4 programs: 0.8–5.4 ms instead of 0.2–1.35 ms</text>
+        <text x="390" y="142" font-size="13" class="ink" font-weight="600">④ later: programmed bytes spend block life</text>
+        <text x="390" y="160" font-size="11" class="ink2">each erase lets every page be programmed once more:</text>
+        <text x="390" y="178" font-size="11.5" class="ink mono" font-weight="600">budget = 1 TB × 10,000 erases = 10,000 TB</text>
+        <text x="390" y="195" font-size="11" class="ink2">flash cannot tell client bytes from moved bytes</text>
+        <text x="390" y="226" font-size="12" class="ink mono">WA 1</text>
+        <rect x="440" y="212" width="300" height="20" class="ambs"/>
+        <text x="590" y="226" font-size="11" class="ink" text-anchor="middle">client 10,000 TB</text>
+        <text x="390" y="256" font-size="12" class="ink mono">WA 4</text>
+        <rect x="440" y="242" width="75" height="20" class="ambs"/>
+        <rect x="515" y="242" width="225" height="20" class="surf"/>
+        <text x="477" y="256" font-size="10.5" class="ink" text-anchor="middle">client 2,500</text>
+        <text x="627" y="256" font-size="11" class="ink2" text-anchor="middle">moved pages 7,500 TB</text>
+        <text x="390" y="280" font-size="11" class="ink2">same erases, same 10,000 TB: WA 4 hands the client a quarter</text>
+        <text x="390" y="296" font-size="11" class="mut">one block, traced write by write: Figure 12, ④</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 11. Write amplification on one write. ① The client sends 4 KB. ② The FTL programs 16 KB, because three old pages had to move with the new one. ③ The cost now: four program times instead of one. ④ The cost later: erases cap how many bytes a drive can ever program, and at WA = 4 the client gets a quarter of that budget (2,500 TB) while moved pages take the rest (7,500 TB). Figure 12, ④ traces the same split on one block.</p>
+  </div>
+
+  <p>The file system above still speaks the interface of page ①: read or write sector n, and overwriting is allowed. It was written for hard disks, and the SSD is meant to drop in under it unchanged. OSTEP presents this as a choice for backwards compatibility: a stable interface between two layers lets each side change on its own, at the price that an interface designed for one generation can fit the next one badly. <span class="src">OSTEP 44.5 and its tip on backwards compatibility</span></p>
+  <p>The part of the SSD that bridges the gap is the <b>flash translation layer</b> (FTL): firmware in the controller that takes reads and writes of logical blocks and turns them into reads, erases and programs of physical pages and blocks (Figure 10). It is asked for good performance and long life at once. <span class="src">OSTEP 44.5</span></p>
+  <p>For performance, two things matter. The first is to use many flash chips in parallel, which every modern SSD does. The second is to keep <b>write amplification</b> low. A page cannot be overwritten (§3), so the FTL often programs more than the client sent: the new data, plus old pages it has to move to make room. <b>Write amplification</b> (WA) measures that excess: the bytes the FTL programs into flash divided by the bytes the client asked to write (Figure 11). ① The client writes 4 KB. ② Behind it, the FTL programs 16 KB, the new page and three old pages moved along with it, so WA = 16 ÷ 4 = 4. WA = 1 would mean no extra writes at all. Reads the FTL makes on the way do not count, because reads do not wear blocks. <span class="src">OSTEP 44.5</span></p>
+  <p>The extra bytes cost twice. ③ Now: the client's write waits for four programs instead of one, 0.8–5.4 ms instead of 0.2–1.35 ms. ④ Later: every programmed byte spends block life. A page can be programmed only once per erase (§3), so the erase limit of §4 is also a budget of programs: a 1 TB drive whose blocks survive about 10,000 erases can program about 10,000 TB over its whole life, and no more. The flash cannot tell the client's bytes from moved ones, so both come out of the same budget. At WA = 1 all 10,000 TB is client data. At WA = 4 every 4 KB the client writes spends 16 KB, so the client gets a quarter, 2,500 TB, and the other 7,500 TB goes to moved pages; the same drive wears out after a quarter of the client writes. §6 traces this on one block, write by write (Figure 12, ④), and page ③ shows the main source of WA in real SSDs, garbage collection; <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#fig-wa">page ③, Figure 3 ②</a> counts this same budget one GC cycle at a time, one erase per cycle. <span class="src">OSTEP 44.4–44.5</span></p>
+  <p>For lifetime, two things matter as well. The first is <b>wear leveling</b>: spreading erases evenly over all blocks so that they wear out at about the same time, instead of a few popular blocks dying early. The second is programming the pages of each block in order, to limit disturbance. <span class="src">OSTEP 44.5</span></p>
+  <p>So the FTL has one question to answer before anything else: when the OS writes logical block n, which physical page should hold it?</p>
+  <p class="gist"><span class="lbl">CARRY</span>The FTL is firmware in the SSD's controller that turns "read or write sector n" into page reads, page programs and block erases. Its goals: chips in parallel, low write amplification (bytes programmed ÷ bytes the client wrote; each extra byte costs program time now and block life later), and even wear.</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="n">§6</span><h2>Why not keep logical page n on physical page n?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-direct">
+    <div class="scroll">
+      <svg viewBox="0 0 760 500" width="760" role="img" aria-label="Direct mapping: to rewrite one page of a 4-page block, the FTL reads all four pages, erases the block, and programs all four pages back. Below, the same write repeated until a block that survives 10 erases wears out: 40 programs, 10 of them client data, against 40 if the client had rewritten all four pages each time">
+        <defs>
+          <marker id="h2e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+        </defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">write(1) = b′ under direct mapping · one 4-page block holding a, b, c, d</text>
+        <g font-size="11" class="mut"><text x="16" y="44">block, before</text><text x="206" y="44">controller memory</text><text x="396" y="44">block, erased</text><text x="586" y="44">block, after</text></g>
+        <g class="ambs"><rect x="16" y="52" width="36" height="50"/><rect x="52" y="52" width="36" height="50"/><rect x="88" y="52" width="36" height="50"/><rect x="124" y="52" width="36" height="50"/></g>
+        <g class="surf"><rect x="206" y="52" width="36" height="50"/><rect x="278" y="52" width="36" height="50"/><rect x="314" y="52" width="36" height="50"/></g>
+        <rect x="242" y="52" width="36" height="50" class="vios"/>
+        <g class="accs"><rect x="396" y="52" width="36" height="50"/><rect x="432" y="52" width="36" height="50"/><rect x="468" y="52" width="36" height="50"/><rect x="504" y="52" width="36" height="50"/></g>
+        <g class="ambs"><rect x="586" y="52" width="36" height="50"/><rect x="622" y="52" width="36" height="50"/><rect x="658" y="52" width="36" height="50"/><rect x="694" y="52" width="36" height="50"/></g>
+        <g font-size="14" class="mono ink" text-anchor="middle">
+          <text x="34" y="80">a</text><text x="70" y="80">b</text><text x="106" y="80">c</text><text x="142" y="80">d</text>
+          <text x="224" y="80">a</text><text x="296" y="80">c</text><text x="332" y="80">d</text>
+          <text x="604" y="80">a</text><text x="676" y="80">c</text><text x="712" y="80">d</text>
+        </g>
+        <text x="260" y="80" font-size="14" class="mono vio" text-anchor="middle" font-weight="600">b′</text>
+        <text x="640" y="80" font-size="14" class="mono vio" text-anchor="middle" font-weight="600">b′</text>
+        <g font-size="10" class="mono ink2" text-anchor="middle">
+          <text x="34" y="96">V</text><text x="70" y="96">V</text><text x="106" y="96">V</text><text x="142" y="96">V</text>
+          <text x="414" y="96">E</text><text x="450" y="96">E</text><text x="486" y="96">E</text><text x="522" y="96">E</text>
+          <text x="604" y="96">V</text><text x="640" y="96">V</text><text x="676" y="96">V</text><text x="712" y="96">V</text>
+        </g>
+        <path d="M164 84 L200 84" class="arr-a" marker-end="url(#h2e)"/><text x="182" y="74" font-size="12" class="acc" text-anchor="middle" font-weight="600">①</text>
+        <path d="M354 84 L390 84" class="arr-a" marker-end="url(#h2e)"/><text x="372" y="74" font-size="12" class="acc" text-anchor="middle" font-weight="600">②</text>
+        <path d="M544 84 L580 84" class="arr-a" marker-end="url(#h2e)"/><text x="562" y="74" font-size="12" class="acc" text-anchor="middle" font-weight="600">③</text>
+        <text x="16" y="132" font-size="12" class="ink">① read all 4 pages into memory and replace b with b′ — 4 page reads</text>
+        <text x="16" y="150" font-size="12" class="ink">② erase the whole block — 1 erase, milliseconds</text>
+        <text x="16" y="168" font-size="12" class="ink">③ program all 4 pages back, in order — 4 page programs</text>
+        <rect x="10" y="182" width="740" height="66" rx="8" class="stps"/>
+        <text x="24" y="206" font-size="12" class="ink">One 4 KB client write cost 4 reads + 1 erase + 4 programs: WA = 4 here, and 64 with 256 KB blocks.</text>
+        <text x="24" y="228" font-size="12" class="ink">And every write to logical page 1 erases this same physical block, so a hot page wears it out first.</text>
+        <text x="16" y="276" font-size="13" class="ink" font-weight="600">④ repeat that write until the block wears out</text>
+        <text x="16" y="294" font-size="11" class="ink2">toy budget: this block survives 10 erases (real blocks: ~10,000), and each erase lets each page be programmed once,</text>
+        <text x="16" y="310" font-size="11" class="ink2">so its whole life holds 4 pages × 10 erases = 40 page programs</text>
+        <g font-size="10.5" class="mut" text-anchor="middle"><text x="40" y="338">write</text><text x="100" y="338">client changed</text><text x="168" y="338">erases</text><text x="226" y="338">programs</text><text x="306" y="338">client pages</text></g>
+        <path d="M16 344 H350" class="ln"/>
+        <g font-size="11" class="mono ink" text-anchor="middle"><text x="40" y="360">1</text><text x="100" y="360" class="vio">b</text><text x="168" y="360">1</text><text x="226" y="360">4</text><text x="300" y="360" class="amb">1</text></g>
+        <g font-size="11" class="mono ink" text-anchor="middle"><text x="40" y="376">2</text><text x="100" y="376" class="vio">d</text><text x="168" y="376">2</text><text x="226" y="376">8</text><text x="300" y="376" class="amb">2</text></g>
+        <g font-size="11" class="mono ink" text-anchor="middle"><text x="40" y="392">3</text><text x="100" y="392" class="vio">b</text><text x="168" y="392">3</text><text x="226" y="392">12</text><text x="300" y="392" class="amb">3</text></g>
+        <g font-size="11" class="mono ink" text-anchor="middle"><text x="40" y="408">…</text><text x="100" y="408" class="vio">…</text><text x="168" y="408">…</text><text x="226" y="408">…</text><text x="300" y="408" class="amb">…</text></g>
+        <g font-size="11" class="mono ink" text-anchor="middle"><text x="40" y="424">10</text><text x="100" y="424" class="vio">a</text><text x="168" y="424">10</text><text x="226" y="424">40</text><text x="300" y="424" class="amb">10</text></g>
+        <text x="16" y="448" font-size="11" class="stp">write 10: the 10th erase, and the block is worn out</text>
+        <path d="M372 330 V452" class="ln"/>
+        <text x="390" y="340" font-size="11" class="ink">direct mapping (①–③ above), WA 4</text>
+        <rect x="390" y="348" width="80" height="20" class="ambs"/><rect x="470" y="348" width="240" height="20" class="surf"/>
+        <text x="430" y="362" font-size="10.5" class="ink" text-anchor="middle">client 10</text><text x="590" y="362" font-size="10.5" class="ink2" text-anchor="middle">moved pages 30</text>
+        <text x="390" y="392" font-size="11" class="ink">client rewrites all four pages each time, WA 1</text>
+        <rect x="390" y="400" width="320" height="20" class="ambs"/>
+        <text x="550" y="414" font-size="10.5" class="ink" text-anchor="middle">client 40</text>
+        <text x="390" y="440" font-size="11" class="ink2">same block, same 10 erases, same 40 programs:</text>
+        <text x="390" y="456" font-size="11" class="ink2">WA only decides how many of them are the client's</text>
+        <text x="16" y="484" font-size="11.5" class="ink">Scaled up, this is Figure 11, ④: 1 TB × 10,000 erases = 10,000 TB programmed; at WA 4 the client gets 2,500 TB of it.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 12. Direct mapping (OSTEP 44.6), traced on a toy 4-page block. Rewriting one page costs the whole block: a read of every page, an erase, and a program of every page. The red box counts the two failures, speed and lifetime. ④ The same write repeated until the block wears out: its 40 programs carry 10 client pages under direct mapping, against 40 if nothing had to move.</p>
+  </div>
+
+  <p>The simplest FTL copies the hard disk: logical page n always lives on physical page n. OSTEP calls this <b>direct mapping</b>. Reads are easy, since a read of logical page n is a read of physical page n. <span class="src">OSTEP 44.6</span></p>
+  <p>Writes are the problem, because physical page n is already programmed and cannot be programmed again (§3). Figure 12 follows a write of logical page 1 into a 4-page block that holds a, b, c and d. ① The FTL reads the whole block into memory and replaces b with b′. ② It erases the block. ③ It programs all four pages back, in order. <span class="src">OSTEP 44.6</span></p>
+  <p>Count the cost. One 4 KB client write became 4 page reads, 1 block erase and 4 page programs, so WA = 4. With realistic 256 KB blocks of 4 KB pages, WA is 256 ÷ 4 = 64, and every single write also waits for a millisecond-scale erase. OSTEP's verdict is that direct mapping writes more slowly than a hard disk, seeks and rotations included. <span class="src">OSTEP 44.6</span></p>
+  <p>Lifetime fails too, and Figure 12, ④ shows how. Each erase lets every page of a block be programmed once more, so a block's erase limit is also a limit on programs: a toy block that survives 10 erases holds 4 × 10 = 40 page programs in its life. Under direct mapping each one-page client write spends 4 of them, 1 for the new page and 3 for old pages moved along, so the block wears out after 10 client writes. Had the client rewritten all four pages each time, nothing would have needed moving, and the same 40 programs would have carried 40 client pages. The block dies after the same 10 erases either way; WA decides only how much of its life reaches the client, because the flash cannot tell client bytes from moved ones. Scaled up, this is Figure 11, ④: a 1 TB drive whose blocks last about 10,000 erases can program about 10,000 TB, and at WA = 4 the client gets 2,500 TB of it. With real 256 KB blocks direct mapping has WA = 64, so the client would get about 1/64, some 156 TB. <span class="src">OSTEP 44.6; the budget arithmetic: beyond OSTEP</span></p>
+  <p>A second problem sharpens the first. File systems rewrite some blocks far more often than others; their own metadata is the usual example. Under direct mapping every rewrite of a popular logical block erases the same physical block, which dies after its ~10,000 cycles while the rest of the chip is nearly new. The workload, not the FTL, decides which blocks wear out. <span class="src">OSTEP 44.6</span></p>
+  <p>Both failures have one cause: tying a logical block to one physical place, the very property that served the hard disk well (page ①, Figure 4).</p>
+  <p class="gist"><span class="lbl">CARRY</span>Direct mapping (logical n = physical n) turns each small write into read, erase and program of a whole block (WA = 4 on the toy block, ≈ 64 on real ones). Every program spends the same erase budget, so the client gets only 1/WA of each block's life, and hot blocks burn out first. The fixed link between address and place has to go.</p>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="n">§7</span><h2>The log-structured FTL: how does writing somewhere new solve both failures?</h2><span class="tag t-ks">★ core · read every line</span></div>
+
+  <div class="figure" id="fig-mirror">
+    <div class="scroll">
+      <svg viewBox="0 0 760 292" width="760" role="img" aria-label="The same sector array as page one; logical block 100 is found through a map; rewriting it moves it from physical page 0 to physical page 4, leaving page 0 as garbage">
+        <defs>
+          <marker id="h2f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker>
+          <marker id="h2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+          <marker id="h2h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="stp"/></marker>
+        </defs>
+        <text x="16" y="36" font-size="13" class="ink" font-weight="600">What the OS sees: the same flat array</text>
+        <text x="16" y="54" font-size="11" class="mut">only the place behind each number changes</text>
+        <g class="surf"><rect x="16" y="66" width="30" height="34"/><rect x="48" y="66" width="30" height="34"/><rect x="144" y="66" width="34" height="34"/><rect x="222" y="66" width="40" height="34"/><rect x="296" y="66" width="40" height="34"/></g>
+        <rect x="180" y="66" width="40" height="34" class="vios"/>
+        <g font-size="12" class="mono ink2" text-anchor="middle"><text x="31" y="88">0</text><text x="63" y="88">1</text><text x="111" y="88">…</text><text x="161" y="88">99</text><text x="242" y="88">101</text><text x="279" y="88">…</text><text x="316" y="88">n−1</text></g>
+        <text x="200" y="88" font-size="12" class="mono vio" text-anchor="middle" font-weight="600">100</text>
+
+        <rect x="360" y="120" width="180" height="92" rx="6" class="surf"/>
+        <text x="372" y="140" font-size="11" class="mut">map (controller memory)</text>
+        <text x="372" y="166" font-size="13" class="mono stp" text-decoration="line-through">100 → page 0</text>
+        <text x="372" y="192" font-size="13" class="mono acc" font-weight="600">100 → page 4</text>
+        <path d="M 200 102 C 200 150, 300 168, 354 168" class="arr" style="stroke:var(--violet)" marker-end="url(#h2f)"/>
+
+        <text x="582" y="62" font-size="10" class="mono mut">block 0 · pages 0–3</text>
+        <rect x="582" y="70" width="40" height="44" class="stps"/><rect x="622" y="70" width="40" height="44" class="ambs"/><rect x="662" y="70" width="40" height="44" class="ambs"/><rect x="702" y="70" width="40" height="44" class="ambs"/>
+        <g font-size="12" class="mono" text-anchor="middle"><text x="602" y="97" class="stp" text-decoration="line-through">a1</text><text x="642" y="97" class="ink">a2</text><text x="682" y="97" class="ink">b1</text><text x="722" y="97" class="ink">b2</text></g>
+        <text x="582" y="162" font-size="10" class="mono mut">block 1 · pages 4–7</text>
+        <rect x="582" y="170" width="40" height="44" class="accs"/><rect x="622" y="170" width="40" height="44" class="ambs"/><rect x="662" y="170" width="40" height="44" class="surf"/><rect x="702" y="170" width="40" height="44" class="surf"/>
+        <g font-size="12" class="mono" text-anchor="middle"><text x="602" y="197" class="acc" font-weight="600">c1</text><text x="642" y="197" class="ink">c2</text><text x="682" y="197" class="ink2">E</text><text x="722" y="197" class="ink2">E</text></g>
+        <path d="M540 192 L578 192" class="arr-a" marker-end="url(#h2g)"/>
+        <path d="M540 160 C 560 140, 562 104, 578 96" class="arr-s" marker-end="url(#h2h)"/>
+
+        <text x="16" y="254" font-size="12" class="ink">write(100) again: the new version goes to the next free page, and only the map entry changes.</text>
+        <text x="16" y="274" font-size="12" class="stp">Page 0 still holds a1 and is still VALID to the chip, but nothing points to it: garbage (page ③).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 13. The SSD version of page ①'s Figure 6. The OS sees the same array of numbers. Behind it, the FTL's map says where each number currently lives; a rewrite of logical block 100 programs a fresh page and moves the map entry, so the place changes on every write.</p>
+  </div>
+
+  <p>The fix gives up the fixed place (Figure 13). When the OS writes logical block n, the FTL does not go back to where n was. It writes the data into the <b>next free page</b> of the block currently being filled, and records in a <b>mapping table</b>, usually just called the map, that n now lives there. Writing in this append-only way is called <b>logging</b>, and an FTL built on it is <b>log-structured</b>; most FTLs today are. A read of n looks n up in the map and reads that page. <span class="src">OSTEP 44.7</span></p>
+  <p>The map does for the SSD what a page table does for virtual memory. A stable number goes in, the current physical location comes out, and the location can change without the user of the number ever noticing.</p>
+  <p>Figure 14 runs OSTEP's example. Blocks hold four 4 KB pages, every page starts INVALID, and the client writes 4 KB logical blocks. <span class="src">OSTEP 44.7</span></p>
+  <p><b>Step 1.</b> The client writes logical block 100 with contents a1. The FTL picks physical block 0, but its pages are INVALID, so it first erases block 0. It then programs page 0 with a1 and records 100 → 0 in the map. The writes of 101 (a2), 2000 (b1) and 2001 (b2) go to pages 1, 2 and 3, in order, and the map gains three more entries. <span class="src">OSTEP 44.7</span></p>
+  <p><b>Step 2.</b> The client rewrites 100 and 101 with c1 and c2. Direct mapping would now read, erase and reprogram block 0. The log-structured FTL instead erases the next block, block 1, and programs pages 4 and 5. The only other change is in the map: 100 → 4 and 101 → 5. A later read of 100 goes map → page 4 → c1. <span class="src">OSTEP 44.7–44.8</span></p>
+
+  <div class="figure" id="fig-log">
+    <div class="scroll">
+      <svg viewBox="0 0 760 330" width="760" role="img" aria-label="Log-structured FTL example: four writes fill block 0, then two overwrites go to block 1 and leave two garbage pages in block 0">
+        <text x="16" y="22" font-size="12" class="ink" font-weight="600">Step 1 · Write(100)=a1, Write(101)=a2, Write(2000)=b1, Write(2001)=b2 (block 0 erased first)</text>
+        <g font-size="10" class="mono mut" text-anchor="middle">
+          <text x="104" y="42">block 0</text><text x="290" y="42">block 1</text><text x="476" y="42">block 2</text>
+        </g>
+        <g>
+          <rect x="16" y="48" width="44" height="52" class="ambs"/><rect x="60" y="48" width="44" height="52" class="ambs"/><rect x="104" y="48" width="44" height="52" class="ambs"/><rect x="148" y="48" width="44" height="52" class="ambs"/>
+          <rect x="202" y="48" width="44" height="52" class="surf"/><rect x="246" y="48" width="44" height="52" class="surf"/><rect x="290" y="48" width="44" height="52" class="surf"/><rect x="334" y="48" width="44" height="52" class="surf"/>
+          <rect x="388" y="48" width="44" height="52" class="surf"/><rect x="432" y="48" width="44" height="52" class="surf"/><rect x="476" y="48" width="44" height="52" class="surf"/><rect x="520" y="48" width="44" height="52" class="surf"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle">
+          <text x="38" y="60">00</text><text x="82" y="60">01</text><text x="126" y="60">02</text><text x="170" y="60">03</text><text x="224" y="60">04</text><text x="268" y="60">05</text><text x="312" y="60">06</text><text x="356" y="60">07</text><text x="410" y="60">08</text><text x="454" y="60">09</text><text x="498" y="60">10</text><text x="542" y="60">11</text>
+        </g>
+        <g font-size="13" class="mono ink" text-anchor="middle">
+          <text x="38" y="80">a1</text><text x="82" y="80">a2</text><text x="126" y="80">b1</text><text x="170" y="80">b2</text>
+        </g>
+        <g font-size="10" class="mono ink2" text-anchor="middle">
+          <text x="38" y="95">V</text><text x="82" y="95">V</text><text x="126" y="95">V</text><text x="170" y="95">V</text><text x="224" y="95">i</text><text x="268" y="95">i</text><text x="312" y="95">i</text><text x="356" y="95">i</text><text x="410" y="95">i</text><text x="454" y="95">i</text><text x="498" y="95">i</text><text x="542" y="95">i</text>
+        </g>
+        <rect x="590" y="40" width="160" height="96" rx="6" class="surf"/>
+        <text x="600" y="58" font-size="11" class="mut">map (in memory)</text>
+        <g font-size="12" class="mono ink"><text x="600" y="78">100  → 0</text><text x="600" y="94">101  → 1</text><text x="600" y="110">2000 → 2</text><text x="600" y="126">2001 → 3</text></g>
+
+        <text x="16" y="180" font-size="12" class="ink" font-weight="600">Step 2 · Write(100)=c1, Write(101)=c2 (block 1 erased first; nothing is overwritten)</text>
+        <g>
+          <rect x="16" y="206" width="44" height="52" class="stps"/><rect x="60" y="206" width="44" height="52" class="stps"/><rect x="104" y="206" width="44" height="52" class="ambs"/><rect x="148" y="206" width="44" height="52" class="ambs"/>
+          <rect x="202" y="206" width="44" height="52" class="ambs"/><rect x="246" y="206" width="44" height="52" class="ambs"/><rect x="290" y="206" width="44" height="52" class="accs"/><rect x="334" y="206" width="44" height="52" class="accs"/>
+          <rect x="388" y="206" width="44" height="52" class="surf"/><rect x="432" y="206" width="44" height="52" class="surf"/><rect x="476" y="206" width="44" height="52" class="surf"/><rect x="520" y="206" width="44" height="52" class="surf"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle">
+          <text x="38" y="218">00</text><text x="82" y="218">01</text><text x="126" y="218">02</text><text x="170" y="218">03</text><text x="224" y="218">04</text><text x="268" y="218">05</text><text x="312" y="218">06</text><text x="356" y="218">07</text><text x="410" y="218">08</text><text x="454" y="218">09</text><text x="498" y="218">10</text><text x="542" y="218">11</text>
+        </g>
+        <g font-size="13" class="mono" text-anchor="middle">
+          <text x="38" y="238" class="stp" text-decoration="line-through">a1</text><text x="82" y="238" class="stp" text-decoration="line-through">a2</text><text x="126" y="238" class="ink">b1</text><text x="170" y="238" class="ink">b2</text><text x="224" y="238" class="ink">c1</text><text x="268" y="238" class="ink">c2</text>
+        </g>
+        <g font-size="10" class="mono ink2" text-anchor="middle">
+          <text x="38" y="253">V</text><text x="82" y="253">V</text><text x="126" y="253">V</text><text x="170" y="253">V</text><text x="224" y="253">V</text><text x="268" y="253">V</text><text x="312" y="253">E</text><text x="356" y="253">E</text><text x="410" y="253">i</text><text x="454" y="253">i</text><text x="498" y="253">i</text><text x="542" y="253">i</text>
+        </g>
+        <rect x="590" y="198" width="160" height="96" rx="6" class="surf"/>
+        <text x="600" y="216" font-size="11" class="mut">map (in memory)</text>
+        <g font-size="12" class="mono"><text x="600" y="236" class="acc" font-weight="600">100  → 4</text><text x="600" y="252" class="acc" font-weight="600">101  → 5</text><text x="600" y="268" class="ink">2000 → 2</text><text x="600" y="284" class="ink">2001 → 3</text></g>
+        <text x="16" y="286" font-size="11" class="stp">pages 00 and 01 are still VALID to the chip, but no map entry points at them: garbage</text>
+        <text x="16" y="304" font-size="11" class="ink2">a read of 100 now goes map → page 4 → c1</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 14. OSTEP's example (44.7–44.8, redrawn) with 4-page blocks. Step 1 fills block 0 in order and records four map entries. Step 2 rewrites logical blocks 100 and 101: the new versions go to the next free pages, 4 and 5, and only the map changes. Pages 0 and 1 now hold dead data that only an erase of block 0 can reclaim, while block 0 still holds the live b1 and b2.</p>
+  </div>
+
+  <p>Compare the two FTLs on the same rewrite. The log-structured one programs exactly the pages the client wrote, so at this moment WA is 1, and it erases once per block filled rather than once per write. Repeated writes to one hot logical block land on different physical pages, so their wear spreads over the chip. Both failures of §6 are gone. <span class="src">OSTEP 44.7</span></p>
+  <p><b>Surviving power loss.</b> The map lives in the controller's volatile memory, yet an SSD that forgot its map would have lost every file. The simplest remedy stores, with every page, a note of which logical block it holds, in a small spare region next to the page called the <b>out-of-band (OOB) area</b>. After a power failure the controller scans the OOB areas and rebuilds the map. Scanning a large SSD is slow, so higher-end devices add logging and checkpointing to recover faster; page ④ shows the same two ideas inside a file system. <span class="src">OSTEP 44.7, aside on mapping persistence</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>A log-structured FTL writes every new version of logical block n to the next free page and updates a map n → page. A write costs one program, erases happen once per filled block, and wear spreads. The map is rebuilt after power loss from the OOB note on each page.</p>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="n">§8</span><h2>What does the log cost?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-chain">
+    <div class="scroll">
+      <svg viewBox="0 0 760 300" width="760" role="img" aria-label="The chain of chapter 44: chip limits lead to the FTL, direct mapping fails, the log-structured FTL works and creates three problems, each with its fix">
+        <defs>
+          <marker id="h2c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker>
+        </defs>
+        <a href="#s3"><rect x="8" y="16" width="176" height="64" rx="6" class="stps"/>
+        <text x="18" y="38" font-size="12" class="ink" font-weight="600">The chip (§3–§4)</text>
+        <text x="18" y="55" font-size="11" class="ink2">no overwrite; erase is per</text>
+        <text x="18" y="70" font-size="11" class="ink2">block; erases wear it out</text></a>
+        <path d="M184 48 L214 48" class="arr" marker-end="url(#h2c)"/>
+        <a href="#s5"><rect x="216" y="16" width="148" height="64" rx="6" class="accs"/>
+        <text x="226" y="38" font-size="12" class="ink" font-weight="600">FTL (§5)</text>
+        <text x="226" y="55" font-size="11" class="ink2">translate sectors to</text>
+        <text x="226" y="70" font-size="11" class="ink2">pages and blocks</text></a>
+        <path d="M364 48 L394 48" class="arr" marker-end="url(#h2c)"/>
+        <a href="#s6"><rect x="396" y="16" width="160" height="64" rx="6" class="stps"/>
+        <text x="406" y="38" font-size="12" class="ink" font-weight="600">Direct mapping ✗ (§6)</text>
+        <text x="406" y="55" font-size="11" class="ink2">sector n = page n;</text>
+        <text x="406" y="70" font-size="11" class="ink2">rewrites a block per write</text></a>
+        <path d="M556 48 L586 48" class="arr" marker-end="url(#h2c)"/>
+        <a href="#s7"><rect x="588" y="16" width="164" height="64" rx="6" class="accs"/>
+        <text x="598" y="38" font-size="12" class="ink" font-weight="600">Log-structured (§7)</text>
+        <text x="598" y="55" font-size="11" class="ink2">append to a free page;</text>
+        <text x="598" y="70" font-size="11" class="ink2">keep a map</text></a>
+        <path d="M670 80 L670 96 L135 96 L135 112" class="arr" marker-end="url(#h2c)"/>
+        <path d="M395 96 L395 112" class="arr" marker-end="url(#h2c)"/>
+        <path d="M645 96 L645 112" class="arr" marker-end="url(#h2c)"/>
+        <text x="20" y="128" font-size="11" class="amb">old versions stay behind: garbage</text>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s2"><rect x="20" y="136" width="230" height="40" rx="6" class="accs"/>
+        <text x="32" y="161" font-size="12" class="ink" font-weight="600">Garbage collection · ③ §1–§2</text></a>
+        <path d="M135 176 L135 196" class="arr" marker-end="url(#h2c)"/>
+        <text x="20" y="212" font-size="11" class="amb">its copies are writes nobody asked for</text>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3"><rect x="20" y="220" width="230" height="64" rx="6" class="vios"/>
+        <text x="32" y="243" font-size="12" class="ink" font-weight="600">★ Write amplification 1/(1−u)</text>
+        <text x="32" y="262" font-size="11" class="ink2">trim and overprovisioning</text>
+        <text x="32" y="277" font-size="11" class="ink2">lower u · ③ §3–§4</text></a>
+        <text x="280" y="128" font-size="11" class="amb">one map entry per page: 1 GB per TB</text>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5"><rect x="280" y="136" width="230" height="40" rx="6" class="accs"/>
+        <text x="292" y="161" font-size="12" class="ink" font-weight="600">Block / hybrid / cached map · ③ §5–§7</text></a>
+        <path d="M395 176 L395 196" class="arr" marker-end="url(#h2c)"/>
+        <text x="280" y="212" font-size="11" class="amb">smaller maps pay in writes or reads</text>
+        <a href="2026-10-08-storage-3-5-flash-caches.html#s2"><rect x="280" y="220" width="230" height="64" rx="6" class="surf"/>
+        <text x="292" y="243" font-size="12" class="ink" font-weight="600">DRAM against writes</text>
+        <text x="292" y="262" font-size="11" class="ink2">the same trade as Kangaroo</text>
+        <text x="292" y="277" font-size="11" class="ink2">· page 3.5 §2–§5</text></a>
+        <text x="540" y="128" font-size="11" class="amb">cold blocks are never erased</text>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s8"><rect x="540" y="136" width="212" height="40" rx="6" class="accs"/>
+        <text x="552" y="161" font-size="12" class="ink" font-weight="600">Wear leveling · ③ §8</text></a>
+        <path d="M645 176 L645 196" class="arr" marker-end="url(#h2c)"/>
+        <text x="540" y="212" font-size="11" class="amb">moving cold data is more writes</text>
+        <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s8"><rect x="540" y="220" width="212" height="64" rx="6" class="surf"/>
+        <text x="552" y="243" font-size="12" class="ink" font-weight="600">More write amplification</text>
+        <text x="552" y="262" font-size="11" class="ink2">· ③ §8</text></a>
+      </svg>
+    </div>
+    <p class="cap">Figure 15. Chapter 44 as one chain. Red boxes are limits or failures, teal boxes are fixes, and amber lines name the problem each fix creates. The top row is this page; the three columns are page ③. Every box is a link.</p>
+  </div>
+
+  <p>Look again at Figure 14, step 2. Pages 0 and 1 still hold a1 and a2 and are still VALID to the chip, but no map entry points to them. They are <b>garbage</b>: dead data taking up space. Every rewrite leaves one more such page behind. A page can be freed only by erasing its whole block, and block 0 also holds the live b1 and b2, so the space cannot simply be taken back. <span class="src">OSTEP 44.7–44.8</span></p>
+  <p>OSTEP names two costs of the log-structured approach. Garbage forces <b>garbage collection</b>, which copies live data and so adds writes. And the map needs one entry per page, which for a large drive is a lot of memory. A third cost comes from wear: blocks full of data that never changes are never collected, so they never take their share of erases while the others wear down. Figure 15 draws the whole chain, with each fix creating the problem the next box solves; page ③ follows each column to its end. <span class="src">OSTEP 44.7, 44.10</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>The log works, but it leaves garbage, needs a big map, and leaves cold blocks unworn. Each is a section of page ③, and garbage collection is the one that sets the price.</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>What this page settled</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>IMPORTANCE</th><th>CLAIM</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td class="c">skim</td><td>An SSD is flash chips, a controller and a little memory behind the same sector interface; nothing moves.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">main</td><td>A cell holds 1–3 bits; the page (~4 KB) is the read and write unit, the block (128–256 KB) the erase unit.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">★ core</td><td>Erase sets a block to 1s, program only turns 1s into 0s, so a page cannot be rewritten without erasing its whole block.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">main</td><td>Read tens of µs, program hundreds of µs, erase ms; a block lasts about 10,000 erases (MLC).</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td class="c">main</td><td>The FTL translates sector requests into flash operations; it aims for parallelism, low write amplification and even wear.</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td class="c">main</td><td>Direct mapping fails: WA ≈ 64 per small write, and hot blocks wear out.</td><td class="c"><a href="#s6">§6</a></td></tr>
+        <tr><td class="c">★ core</td><td>The log-structured FTL appends each write to a free page and keeps a map; the map is rebuilt from OOB notes after power loss.</td><td class="c"><a href="#s7">§7</a></td></tr>
+        <tr><td class="c">main</td><td>The log's costs: garbage (and its collection), a large map, uneven wear.</td><td class="c"><a href="#s8">§8</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="axes">
+  <div class="sec-head"><h2>The comparison so far</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>AXIS (FROM ①)</th><th>HARD DISK</th><th>SSD (FILLED ON THIS PAGE)</th></tr></thead>
+      <tbody>
+        <tr><td><b>A1 · What holds a bit</b></td><td>Magnetized spot; moving parts.</td><td>Charge trapped in a transistor cell; no moving parts.</td></tr>
+        <tr class="win-a"><td><b>A2 · Operations and units</b></td><td>Read/write a sector; overwrite in place.</td><td>Read and program a page (~4 KB); erase a block (128–256 KB). No overwrite.</td></tr>
+        <tr><td><b>A3 · Where the time goes</b></td><td>Positioning: ms.</td><td>The kind of operation: read tens of µs, program hundreds of µs, erase ms. Position does not matter.</td></tr>
+        <tr class="win-a"><td><b>A4 · Address → place</b></td><td>Fixed.</td><td>Moving: each new version of logical block n goes to a new page, and the map follows it.</td></tr>
+        <tr><td><b>A6 · Wear and failure</b></td><td>Mechanical faults; rewrites do not wear.</td><td>Wear-out after ~10,000 P/E cycles (MLC); read and program disturbance.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="series">
+  <div class="sec-head"><h2>The pages</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAGE</th><th>IMPORTANCE</th><th>QUESTION IT ANSWERS</th><th>STANDS IN FOR</th></tr></thead>
+      <tbody>
+        <tr><td><a href="2026-10-08-storage-1-hard-disk-rebuilt.html"><b>① The hard disk</b></a></td><td class="c">main</td><td>Why is random access slow, and what is the OS promised?</td><td>OSTEP 37.1–37.4</td></tr>
+        <tr><td><b>② Flash and the FTL</b> (here)</td><td class="c">★ core</td><td>What can a flash chip not do, and how does the SSD still look like a disk?</td><td>OSTEP 44.1–44.7</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-garbage-and-write-amplification.html"><b>③ Garbage and write amplification</b></a></td><td class="c">★ core</td><td>What does never overwriting cost, and how is the cost kept down?</td><td>OSTEP 44.8–44.12</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-5-flash-caches.html"><b>3.5 Flash caches</b></a></td><td class="c">★ core</td><td>How does a cache find a tiny object on flash, and why does that cost DRAM?</td><td>the papers' background sections</td></tr>
+        <tr><td><a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a></td><td class="c">main</td><td>How does a file system write only sequentially, and still find its data?</td><td>OSTEP 43</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="legend">
+  <div class="sec-head"><h2>Terms and figure marks</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>TERM OR MARK</th><th>MEANING</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Controller · NAND package</b></td><td>The processor chip that runs the FTL; a package holding one or more flash dies.</td><td class="c"><a href="#fig-board">F1</a> <a href="#fig-inside">F10</a></td></tr>
+        <tr><td><b>SLC · MLC · TLC</b></td><td>Cells holding 1, 2 or 3 bits (2, 4 or 8 charge levels).</td><td class="c"><a href="#fig-cells">F2</a></td></tr>
+        <tr><td><b>Plane · block · page</b></td><td>A plane holds many blocks; a block (erase unit) holds many pages (read and program unit).</td><td class="c"><a href="#fig-cells">F2</a> <a href="#fig-count">F3</a></td></tr>
+        <tr><td><b>String · control gate · page buffer</b></td><td>A vertical stack of cells on one channel · the gate of one layer, shared across a row, which switches on a whole page · the circuit that holds the page being read or programmed.</td><td class="c"><a href="#vid-cell-to-die">V2</a></td></tr>
+        <tr><td><b>Video N · ▶ m:ss</b></td><td>Frames from Branch Education's “How do SSDs Work?” (2020) placed under the figure they match; the frames are not reproduced here; each card opens that moment on YouTube.</td><td class="c"><a href="#vid-package">V1</a> <a href="#vid-cell-to-die">V2</a> <a href="#vid-erase">V3</a></td></tr>
+        <tr><td><b>Word line · bitline</b></td><td>The gate wire shared by one layer's cells in a row (it picks the page); the wire on top of each string (it picks or protects the cell). V<sub>read</sub> and V<sub>pass</sub> are the voltages a read puts on the chosen and the other word lines.</td><td class="c"><a href="#fig-cell">F5</a></td></tr>
+        <tr><td><b>Lower · middle · upper page</b></td><td>The three pages one TLC word line holds, one per bit of each cell.</td><td class="c"><a href="#fig-count">F3</a> <a href="#fig-once">F6</a></td></tr>
+        <tr><td><b>ECC · NOP</b></td><td>Error-correcting code kept in each page's spare bytes; the number of partial programs a datasheet allows per page (1 for MLC and TLC).</td><td class="c"><a href="#fig-once">F6</a></td></tr>
+        <tr><td><b>Read disturb · program disturb</b></td><td>Bits flipped in pages that were not chosen, by the pass voltage of reads or the high voltage of programs.</td><td class="c"><a href="#fig-wear">F9</a> <a href="#fig-once">F6</a></td></tr>
+        <tr><td><b>Cycle</b></td><td>One tick of the CPU clock; at 3 GHz, 1 µs = 3,000 cycles.</td><td class="c"><a href="#fig-cycles">F8</a></td></tr>
+        <tr><td><b>i · E · V</b></td><td>Page states: INVALID, ERASED, VALID.</td><td class="c"><a href="#fig-states">F4</a> <a href="#fig-log">F14</a></td></tr>
+        <tr><td><b>P/E cycle</b></td><td>One program/erase of a block; blocks are rated for about 10,000 (MLC) to 100,000 (SLC).</td><td class="c"><a href="#s4">§4</a> <a href="#fig-wear">F9</a></td></tr>
+        <tr><td><b>WA</b></td><td>Write amplification: bytes written to flash ÷ bytes the client asked to write.</td><td class="c"><a href="#s5">§5</a> <a href="#fig-wa">F11</a> <a href="#fig-direct">F12</a></td></tr>
+        <tr><td><b>Map · OOB area</b></td><td>The FTL's table logical block → physical page; the spare bytes beside each page that record its logical block.</td><td class="c"><a href="#fig-mirror">F13</a> <a href="#fig-log">F14</a></td></tr>
+        <tr><td><b>Red, struck page</b></td><td>A page still VALID to the chip but no longer pointed to by the map: garbage.</td><td class="c"><a href="#fig-mirror">F13</a> <a href="#fig-log">F14</a></td></tr>
+        <tr><td><b>Log scale</b></td><td>Each grid step is ten times the previous one.</td><td class="c"><a href="#fig-time">F7</a> <a href="#fig-cycles">F8</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>Leaves out · assumes</h2></div>
+  <p><b>Leaves out.</b> Cell physics and 3D NAND (OSTEP points to JEDEC JEP122F). How the controller spreads pages over chips, channels and planes. Map recovery beyond the OOB scan (OSTEP 44.7 aside; logging and checkpoints appear on page ④).</p>
+  <p><b>Assumes.</b> Page ① (the sector interface and the fixed hard-disk mapping), and the page-table idea from virtual memory.</p>
+  <p><b>Next.</b> <a href="2026-10-08-storage-3-garbage-and-write-amplification.html"><b>③ Garbage and write amplification</b></a>: what it costs to reclaim pages 0 and 1 of Figure 14, proved as a formula, and the rest of chapter 44.</p>
+</section>
+
+</div>

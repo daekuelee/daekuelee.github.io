@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garbage and write amplification</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture series">
+  <span>쇼츠 강의</span><span>›</span><span>Storage: OSTEP 37 → 44 → 43</span>
+  <span class="sp"><a href="2026-10-08-storage-1-hard-disk-rebuilt.html">① Hard disk</a> · <a href="2026-10-08-storage-2-flash-and-ftl.html">② Flash + FTL ★</a> · <b style="color:var(--ink)">③ Garbage + WA ★</b> · <a href="2026-10-08-storage-3-5-flash-caches.html">3.5 Flash cache ★</a> · <a href="2026-10-08-storage-4-log-structured-file-system.html">④ LFS</a> · <a href="https://www.youtube.com/watch?v=5Mh3o886qpg">▶ Video (YouTube)</a></span>
+</nav>
+
+<header>
+  <div class="eyebrow">Short lecture · 2026-10-08 · page ③ of 4 · importance: ★ core (holds the keystone) · stands in for OSTEP 44.8–44.12</div>
+  <h1>③ The price of never overwriting: garbage, write amplification, the map, and wear</h1>
+  <p class="subtitle">Page ② left the SSD with a log-structured FTL that writes every new version to a fresh page. A nearly full drive must keep taking writes on top of that, so the log needs a steady supply of free pages. That choice also needs one map entry per page and lets cold blocks escape wear. This page prices each cost and shows how it is kept down. The central result is one formula: if the block being reclaimed is still a fraction u live, every page the user writes costs 1/(1−u) pages of flash writing.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read · skim = the figure and the CARRY line at the end of the section are enough. Paper tags: <b>papers: needed</b> = the OpenStd papers use it without explaining it · <b>papers: skip</b> = safe to pass on the way to the papers. Nothing is cut; the amber line under each heading says which part the papers use.</p>
+</header>
+
+<section id="overview">
+  <div class="figure" id="fig-overview">
+    <div class="scroll">
+      <svg viewBox="0 0 760 322" width="760" role="img" aria-label="What this page is about: the goal of a full drive that keeps taking writes without overwriting; cost 1, free pages: the log needs them, garbage collection supplies them, the price is write amplification 1 over 1 minus u, and the levers that lower it; cost 2, the map; cost 3, uneven wear; each box links to its section">
+        <defs><marker id="h3o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <rect x="16" y="8" width="728" height="50" rx="6" class="ambs"/>
+        <text x="28" y="29" font-size="12.5" class="ink" font-weight="600">Goal: a nearly full drive keeps taking writes, never overwrites, and wastes as few extra writes as it can.</text>
+        <text x="28" y="47" font-size="11" class="ink2">Page ② chose the log for this: every new version goes to a fresh page. This page prices what that choice costs.</text>
+        <text x="16" y="84" font-size="12" class="acc" font-weight="600">cost 1 · free pages: the keystone of this page (§1–§4)</text>
+        <rect x="16" y="94" width="170" height="88" rx="6" class="surf"/>
+        <text x="26" y="114" font-size="12" class="ink" font-weight="600">The log needs free pages</text>
+        <g font-size="10.5" class="ink2"><text x="26" y="131">every write takes a fresh one,</text><text x="26" y="145">so they must keep coming</text></g>
+        <a href="#s1"><rect x="26" y="156" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="43" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§1</text></a>
+        <rect x="202" y="94" width="170" height="88" rx="6" class="accs"/>
+        <text x="212" y="114" font-size="12" class="ink" font-weight="600">GC supplies them</text>
+        <g font-size="10.5" class="ink2"><text x="212" y="131">copy a block's live pages out,</text><text x="212" y="145">then erase the block</text></g>
+        <a href="#s2"><rect x="212" y="156" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="229" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§2</text></a>
+        <rect x="388" y="94" width="170" height="88" rx="6" class="vios"/>
+        <text x="398" y="114" font-size="12" class="vio" font-weight="600">The price: WA = 1/(1−u)</text>
+        <g font-size="10.5" class="ink2"><text x="398" y="131">extra writes per client page;</text><text x="398" y="145">u = live share of the victim</text></g>
+        <a href="#fig-gc"><rect x="398" y="156" width="56" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="426" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§2 box</text></a>
+        <a href="#s3"><rect x="460" y="156" width="46" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="483" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§3 ★</text></a>
+        <rect x="574" y="94" width="170" height="88" rx="6" class="accs"/>
+        <text x="584" y="114" font-size="12" class="ink" font-weight="600">Lower the price</text>
+        <g font-size="10.5" class="ink2"><text x="584" y="131">collect late, from the emptiest</text><text x="584" y="145">block; lower u: trim, OP</text></g>
+        <a href="#fig-gc"><rect x="584" y="156" width="46" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="607" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§2 ③</text></a>
+        <a href="#s4"><rect x="636" y="156" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="653" y="169" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§4</text></a>
+        <path d="M186 138 H200" class="arr" marker-end="url(#h3o)"/>
+        <path d="M372 138 H386" class="arr" marker-end="url(#h3o)"/>
+        <path d="M558 138 H572" class="arr" marker-end="url(#h3o)"/>
+        <rect x="16" y="196" width="356" height="82" rx="6" class="surf"/>
+        <text x="26" y="216" font-size="12" class="ink" font-weight="600">cost 2 · the map</text>
+        <g font-size="10.5" class="ink2"><text x="26" y="233">one map entry per page: about 1 GB of DRAM per TB;</text><text x="26" y="247">smaller maps (block, hybrid, cached) pay in writes or reads</text></g>
+        <a href="#s5"><rect x="26" y="252" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="43" y="265" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§5</text></a>
+        <a href="#s6"><rect x="66" y="252" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="83" y="265" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§6</text></a>
+        <a href="#s7"><rect x="106" y="252" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="123" y="265" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§7</text></a>
+        <rect x="388" y="196" width="356" height="82" rx="6" class="surf"/>
+        <text x="398" y="216" font-size="12" class="ink" font-weight="600">cost 3 · uneven wear</text>
+        <g font-size="10.5" class="ink2"><text x="398" y="233">cold blocks escape GC and are never erased;</text><text x="398" y="247">wear leveling moves them, for a little more WA</text></g>
+        <a href="#s8"><rect x="398" y="252" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="415" y="265" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§8</text></a>
+        <text x="16" y="306" font-size="11.5" class="ink2">Then the finished SSD against the hard disk, and what to hand to the papers and page 3.5:</text>
+        <a href="#s9"><rect x="536" y="293" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="553" y="306" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§9</text></a>
+        <a href="#s10"><rect x="576" y="293" width="40" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="596" y="306" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§10</text></a><a href="2026-10-08-storage-3-5-flash-caches.html"><rect x="624" y="293" width="84" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="666" y="306" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">page 3.5 ★</text></a>
+      </svg>
+    </div>
+    <p class="cap">What this page is about. The goal on top; the log's three costs below it, with cost 1 as the chain the keystone sits in. Every round chip opens its section.</p>
+  </div>
+  <p class="gist why" id="must"><span class="lbl">MUST READ</span>The figure is the page's spine: the log needs a steady supply of free pages, garbage collection supplies them, and §2–§4 price that supply and lower the price. Read §2 and §3 (★ core) in full, and §1, §4–§6, §9 and §10 as main; §7 and §8 are skim, figure and CARRY. Figure 2's purple box is the price of one supply cycle, and its panel ③ is the first lever. <b>On the way to the papers:</b> §1–§5 are needed, §6–§9 can be skipped, and §10 shows the one idea the papers take from this page: the writer above sets u, so it sets DLWA. Their own background, why DRAM is the cost a flash cache fights and how Flashield, Kangaroo, FairyWREN and Nemo each fix what the design before them left, is <a href="2026-10-08-storage-3-5-flash-caches.html">page 3.5</a>, read next; <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12</a> holds the mechanisms they take from LFS.</p>
+</section>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>Where does garbage come from, and why can't it be reused at once?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>All of it, briefly: the papers say "cleaning" or "garbage collection" without explaining it. Kangaroo §2.2 and FairyWREN §3.1 start from this section's fact, that a dead page is freed only together with its whole block, which in today's drives is an erase unit of many blocks, up to gigabytes. A cache may instead drop a whole unit with nothing copied: <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.4</a>.</p>
+
+  <div class="figure" id="fig-gc-wiki">
+    <img src="img/2026-10-08-wikipedia-garbage-collection.png" alt="Three panels: four pages A to D are written to block X; new pages E to H and new versions A-prime to D-prime are written, leaving A to D stale; the good pages are copied to block Y and block X is erased" style="width:100%;max-width:720px;height:auto;display:block;margin:0 auto">
+    <p class="cap">Figure 1. Garbage building up, and garbage collection, as Wikipedia draws it. Panel 1: pages A–D are written to free pages of block X. Panel 2: new pages E–H and new versions A′–D′ arrive; A–D become stale but cannot be overwritten. Panel 3: the good pages are copied to block Y, and block X is erased. Image: Music Sorter, <a href="https://commons.wikimedia.org/wiki/File:Garbage_Collection.png">Wikimedia Commons</a> (from the English Wikipedia article "Write amplification"), <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>.</p>
+  </div>
+
+  <p><b>Garbage</b> is the old version of a logical block after that block has been rewritten. Figure 1 shows it building up. In panel 1, four pages A–D are written into free pages of block X. In panel 2, four new pages E–H arrive and A–D are rewritten as A′–D′. The log-structured FTL puts all eight into free pages, so A–D stay where they were, still VALID to the chip but no longer pointed to by the map. Those four are garbage, also called dead pages. <span class="src">OSTEP 44.7–44.8</span></p>
+  <p>Garbage cannot be reused page by page. A dead page is a programmed page, and page ② §3 showed that a programmed page becomes writable again only when its whole block is erased. In Figure 1 the four dead pages of block X can be freed only together with its eight live ones, so the live ones must first be copied to another block, Y. That copy-then-erase, panel 3, is <b>garbage collection</b>. <span class="src">OSTEP 44.8</span></p>
+  <p>Without collection the drive would run out of free pages even if the user's data never grew, because every rewrite takes a fresh page and leaves a dead one behind.</p>
+  <p class="gist"><span class="lbl">CARRY</span>Every rewrite leaves its old version behind as a dead page. A dead page comes back only when its whole block is erased, so the live pages sharing that block must be copied out first.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>How does garbage collection reclaim a block?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>Needed: the four steps and how liveness is decided. Kangaroo §2.2 puts it in one line: "Most dlwa is caused by cleaning activity that copies live pages elsewhere before an erase block is cleared." FairyWREN and Nemo run this same loop inside the cache itself (<a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8</a>); <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.4</a> shows the cache's version, which may drop live objects instead of copying them, and <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">§12.5</a> the liveness rule a third time. Skip: <i>When GC runs</i> and Figure 2, ③.</p>
+
+  <div class="figure" id="fig-gc">
+    <div class="scroll">
+      <svg viewBox="0 0 760 758" width="760" role="img" aria-label="Garbage collection of block 0: live pages b1 and b2 are copied to pages 6 and 7, then block 0 is erased; the accounting shows four programs for two client pages; below, in three steps: the head of the log fills and the free blocks drop to the threshold, which triggers GC; GC then collects the full block with the fewest live pages, and the free blocks are back above the threshold">
+        <defs><marker id="h3v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker></defs>
+        <defs>
+          <marker id="h3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+        </defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Before · block 0 is the victim: 2 of its 4 pages are live, so u = 2/4</text>
+        <g font-size="10" class="mono mut" text-anchor="middle"><text x="104" y="38">block 0 (victim)</text><text x="290" y="38">block 1</text><text x="476" y="38">block 2</text></g>
+        <g>
+          <rect x="16" y="44" width="44" height="50" class="stps"/><rect x="60" y="44" width="44" height="50" class="stps"/><rect x="104" y="44" width="44" height="50" class="ambs"/><rect x="148" y="44" width="44" height="50" class="ambs"/>
+          <rect x="202" y="44" width="44" height="50" class="ambs"/><rect x="246" y="44" width="44" height="50" class="ambs"/><rect x="290" y="44" width="44" height="50" class="accs"/><rect x="334" y="44" width="44" height="50" class="accs"/>
+          <rect x="388" y="44" width="44" height="50" class="surf"/><rect x="432" y="44" width="44" height="50" class="surf"/><rect x="476" y="44" width="44" height="50" class="surf"/><rect x="520" y="44" width="44" height="50" class="surf"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="38" y="55">00</text><text x="82" y="55">01</text><text x="126" y="55">02</text><text x="170" y="55">03</text><text x="224" y="55">04</text><text x="268" y="55">05</text><text x="312" y="55">06</text><text x="356" y="55">07</text><text x="410" y="55">08</text><text x="454" y="55">09</text><text x="498" y="55">10</text><text x="542" y="55">11</text></g>
+        <g font-size="13" class="mono" text-anchor="middle"><text x="38" y="75" class="stp" text-decoration="line-through">a1</text><text x="82" y="75" class="stp" text-decoration="line-through">a2</text><text x="126" y="75" class="ink" font-weight="600">b1</text><text x="170" y="75" class="ink" font-weight="600">b2</text><text x="224" y="75" class="ink">c1</text><text x="268" y="75" class="ink">c2</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="38" y="89">dead</text><text x="82" y="89">dead</text><text x="126" y="89">live</text><text x="170" y="89">live</text><text x="224" y="89">V</text><text x="268" y="89">V</text><text x="312" y="89">E</text><text x="356" y="89">E</text><text x="410" y="89">i</text><text x="454" y="89">i</text><text x="498" y="89">i</text><text x="542" y="89">i</text></g>
+        <rect x="590" y="36" width="160" height="92" rx="6" class="surf"/>
+        <text x="600" y="54" font-size="11" class="mut">map</text>
+        <g font-size="12" class="mono ink"><text x="600" y="72">100  → 4</text><text x="600" y="88">101  → 5</text><text x="600" y="104">2000 → 2</text><text x="600" y="120">2001 → 3</text></g>
+        <path d="M126 96 C 140 130, 300 120, 312 150" class="arr-a" marker-end="url(#h3a)"/>
+        <path d="M170 96 C 190 128, 340 118, 356 150" class="arr-a" marker-end="url(#h3a)"/>
+        <text x="392" y="128" font-size="11" class="acc" font-weight="600">① copy the live pages: 2 programs</text>
+        <text x="16" y="146" font-size="12" class="ink" font-weight="600">After · ② erase block 0</text>
+        <g>
+          <rect x="16" y="156" width="44" height="50" class="accs"/><rect x="60" y="156" width="44" height="50" class="accs"/><rect x="104" y="156" width="44" height="50" class="accs"/><rect x="148" y="156" width="44" height="50" class="accs"/>
+          <rect x="202" y="156" width="44" height="50" class="ambs"/><rect x="246" y="156" width="44" height="50" class="ambs"/><rect x="290" y="156" width="44" height="50" class="ambs"/><rect x="334" y="156" width="44" height="50" class="ambs"/>
+          <rect x="388" y="156" width="44" height="50" class="surf"/><rect x="432" y="156" width="44" height="50" class="surf"/><rect x="476" y="156" width="44" height="50" class="surf"/><rect x="520" y="156" width="44" height="50" class="surf"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="38" y="167">00</text><text x="82" y="167">01</text><text x="126" y="167">02</text><text x="170" y="167">03</text><text x="224" y="167">04</text><text x="268" y="167">05</text><text x="312" y="167">06</text><text x="356" y="167">07</text><text x="410" y="167">08</text><text x="454" y="167">09</text><text x="498" y="167">10</text><text x="542" y="167">11</text></g>
+        <g font-size="13" class="mono ink" text-anchor="middle"><text x="224" y="187">c1</text><text x="268" y="187">c2</text><text x="312" y="187" font-weight="600">b1</text><text x="356" y="187" font-weight="600">b2</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="38" y="201">E</text><text x="82" y="201">E</text><text x="126" y="201">E</text><text x="170" y="201">E</text><text x="224" y="201">V</text><text x="268" y="201">V</text><text x="312" y="201">V</text><text x="356" y="201">V</text><text x="410" y="201">i</text><text x="454" y="201">i</text><text x="498" y="201">i</text><text x="542" y="201">i</text></g>
+        <rect x="590" y="148" width="160" height="92" rx="6" class="surf"/>
+        <text x="600" y="166" font-size="11" class="mut">map</text>
+        <g font-size="12" class="mono"><text x="600" y="184" class="ink">100  → 4</text><text x="600" y="200" class="ink">101  → 5</text><text x="600" y="216" class="acc" font-weight="600">2000 → 6</text><text x="600" y="232" class="acc" font-weight="600">2001 → 7</text></g>
+        <rect x="16" y="252" width="734" height="98" rx="8" class="vios"/>
+        <text x="30" y="274" font-size="12" class="vio" font-weight="600">Is the supply free? One cycle = this reclaim + the client writes that use up its gain (N = 4, u = 2/4)</text>
+        <text x="30" y="294" font-size="12" class="ink">GC programs u·N = 2 pages (b1, b2) and erases N = 4 pages: net gain (1−u)·N = 2 free pages.</text>
+        <text x="30" y="312" font-size="12" class="ink">Those 2 free pages take the next 2 client writes. Flash programs this cycle: 2 + 2 = 4 = N.</text>
+        <text x="30" y="332" font-size="12" class="ink">WA = 4 programs ÷ 2 client pages = <tspan class="vio" font-weight="600">2 = 1/(1 − 0.5)</tspan></text>
+        <path d="M16 364 H744" class="ln"/>
+        <text x="16" y="388" font-size="12" class="ink" font-weight="600">③ the first lever on the price: when GC runs, and which block it collects</text>
+        <text x="744" y="388" font-size="10.5" class="mut" text-anchor="end">8 blocks, illustrative; not blocks 0–2 above</text>
+        <text x="16" y="412" font-size="11.5" class="ink" font-weight="600">step 1 · a moment ago: 3 free blocks, above the threshold of 2, so GC does not run</text>
+        <rect x="16" y="420" width="80" height="36" rx="4" class="accs"/><text x="56" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="56" y="449" font-size="10" class="mono ink2" text-anchor="middle">live 3/4</text>
+        <rect x="104" y="420" width="80" height="36" rx="4" class="accs"/><text x="144" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="144" y="449" font-size="10" class="mono ink2" text-anchor="middle">live 1/4</text>
+        <rect x="192" y="420" width="80" height="36" rx="4" class="accs"/><text x="232" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="232" y="449" font-size="10" class="mono ink2" text-anchor="middle">live 4/4</text>
+        <rect x="280" y="420" width="80" height="36" rx="4" class="accs"/><text x="320" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="320" y="449" font-size="10" class="mono ink2" text-anchor="middle">live 2/4</text>
+        <rect x="368" y="420" width="80" height="36" rx="4" class="ambs"/><text x="408" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">filling</text><text x="408" y="449" font-size="10" class="mono ink2" text-anchor="middle">log head</text>
+        <rect x="456" y="420" width="80" height="36" rx="4" class="surf"/><text x="496" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="496" y="449" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <rect x="544" y="420" width="80" height="36" rx="4" class="surf"/><text x="584" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="584" y="449" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <rect x="632" y="420" width="80" height="36" rx="4" class="surf"/><text x="672" y="435" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="672" y="449" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <text x="16" y="486" font-size="11.5" class="ink" font-weight="600">step 2 · trigger: the head fills, a free block becomes the new head, and free blocks drop to 2 = threshold</text>
+        <rect x="16" y="494" width="80" height="36" rx="4" class="accs"/><text x="56" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="56" y="523" font-size="10" class="mono ink2" text-anchor="middle">live 3/4</text>
+        <rect x="104" y="494" width="80" height="36" rx="4" class="accs"/><text x="144" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="144" y="523" font-size="10" class="mono ink2" text-anchor="middle">live 1/4</text>
+        <rect x="192" y="494" width="80" height="36" rx="4" class="accs"/><text x="232" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="232" y="523" font-size="10" class="mono ink2" text-anchor="middle">live 4/4</text>
+        <rect x="280" y="494" width="80" height="36" rx="4" class="accs"/><text x="320" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="320" y="523" font-size="10" class="mono ink2" text-anchor="middle">live 2/4</text>
+        <rect x="368" y="494" width="80" height="36" rx="4" class="accs" style="stroke:var(--amber);stroke-width:2.4"/><text x="408" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="408" y="523" font-size="10" class="mono ink2" text-anchor="middle">live 3/4</text>
+        <rect x="456" y="494" width="80" height="36" rx="4" class="ambs"/><text x="496" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">filling</text><text x="496" y="523" font-size="10" class="mono ink2" text-anchor="middle">new head</text>
+        <rect x="544" y="494" width="80" height="36" rx="4" class="surf"/><text x="584" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="584" y="523" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <rect x="632" y="494" width="80" height="36" rx="4" class="surf"/><text x="672" y="509" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="672" y="523" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <text x="456" y="546" font-size="10.5" class="amb" text-anchor="middle">old head filled ↑   ↑ opened from free</text>
+        <path d="M632 533 V537 H712 V533" class="ln"/>
+        <text x="672" y="550" font-size="10.5" class="stp" text-anchor="middle" font-weight="600">free 3 → 2: GC starts</text>
+        <text x="16" y="574" font-size="11.5" class="ink" font-weight="600">step 3 · choice: GC picks the full block with the fewest live pages, moves its live page, erases it: free is 3 again</text>
+        <rect x="16" y="582" width="80" height="36" rx="4" class="accs"/><text x="56" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="56" y="611" font-size="10" class="mono ink2" text-anchor="middle">live 3/4</text>
+        <rect x="104" y="582" width="80" height="36" rx="4" class="surf" style="stroke:var(--violet);stroke-width:2.4"/><text x="144" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="144" y="611" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <rect x="192" y="582" width="80" height="36" rx="4" class="accs"/><text x="232" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="232" y="611" font-size="10" class="mono ink2" text-anchor="middle">live 4/4</text>
+        <rect x="280" y="582" width="80" height="36" rx="4" class="accs"/><text x="320" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="320" y="611" font-size="10" class="mono ink2" text-anchor="middle">live 2/4</text>
+        <rect x="368" y="582" width="80" height="36" rx="4" class="accs"/><text x="408" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">full</text><text x="408" y="611" font-size="10" class="mono ink2" text-anchor="middle">live 3/4</text>
+        <rect x="456" y="582" width="80" height="36" rx="4" class="ambs" style="stroke:var(--violet);stroke-width:2.4"/><text x="496" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">filling</text><text x="496" y="611" font-size="10" class="mono ink2" text-anchor="middle">+1 moved</text>
+        <rect x="544" y="582" width="80" height="36" rx="4" class="surf"/><text x="584" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="584" y="611" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <rect x="632" y="582" width="80" height="36" rx="4" class="surf"/><text x="672" y="597" font-size="11" class="ink" text-anchor="middle" font-weight="600">free</text><text x="672" y="611" font-size="10" class="mono ink2" text-anchor="middle">erased</text>
+        <path d="M106 634 C 200 652, 400 652, 494 634" style="stroke:var(--violet);stroke-width:1.4;fill:none" marker-end="url(#h3v)"/>
+        <text x="300" y="662" font-size="10.5" class="vio" text-anchor="middle" font-weight="600">victim (live 1/4): its 1 live page moves to the head, then the block is erased</text>
+        <text x="672" y="634" font-size="10.5" class="ink2" text-anchor="middle">free 2 → 3: GC stops</text>
+        <text x="16" y="690" font-size="12" class="ink">The trigger is how many blocks are free (when); the choice is how full each candidate is (which).</text>
+        <text x="16" y="708" font-size="11.5" class="ink2">Only full blocks are candidates; the block at the head of the log is still filling and is never a victim.</text>
+        <text x="16" y="726" font-size="11.5" class="ink2">The threshold sits above 0 because GC needs free pages to copy into, and client writes should not wait for it.</text>
+        <text x="16" y="744" font-size="11" class="mut">With free blocks to spare, GC can also run early, in idle time. Figure 1 has only two blocks, so there X is the only candidate.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 2. One garbage collection on OSTEP's example (44.8, redrawn), continuing Figure 14 of page ②. The victim, block 0, has two dead pages and two live ones. ① The live b1 and b2 are copied to pages 6 and 7, and the map is updated. ② Block 0 is erased. The violet box counts what the reclaim cost. ③ When GC runs, in three steps: step 1, above the threshold, no GC; step 2, the head of the log fills, a free block becomes the new head, and the free blocks drop to the threshold, which is the trigger; step 3, only then GC chooses the full block with the fewest live pages, moves its live page and erases it.</p>
+  </div>
+
+  <p>Garbage collection (GC) runs in four steps: choose a block that holds dead pages, called the <b>victim</b>; read its live pages; write them to the head of the log as if they were new writes; erase the victim, so that all its pages are free again. <span class="src">OSTEP 44.8</span></p>
+  <p><b>When GC runs.</b> One block filling up does not start GC. The log always writes into the block at its head, and when that block is full the FTL opens a free, erased block. GC keeps free blocks in stock, and the trigger is their count. In Figure 2, ③, the head of the log fills, the FTL opens a free block as the new head, and the free blocks drop to the threshold (step 2); that drop starts GC. Only then is a victim chosen (step 3). The victim is chosen among full blocks only, since the block at the head of the log is still being filled, and it is usually the one with the fewest live pages, the greedy rule of §4. With free blocks to spare, GC can run early, while the drive is idle. With none left, a client's write has to wait for it, which is the "now" cost of <a href="2026-10-08-storage-2-flash-and-ftl.html#fig-wa">page ②, Figure 11</a>. Wikipedia's Figure 1 has only two blocks, so there X is the only candidate. <span class="src">OSTEP 44.8 (cleaning pushed to idle time); the free-block threshold: beyond OSTEP</span></p>
+  <p>In Figure 2, which continues page ②'s example, the victim is block 0. Its pages hold a1, a2, b1 and b2. a1 and a2 are dead, since logical blocks 100 and 101 were rewritten into pages 4 and 5; b1 and b2 are live. ① The FTL reads b1 and b2 and programs them into the next free pages, 6 and 7, and updates the map to 2000 → 6 and 2001 → 7. ② It erases block 0, and four free pages are back. <span class="src">OSTEP 44.8</span></p>
+  <p>How does the FTL know which pages are live? Each page carries, in its OOB area (page ② §7), the number of the logical block it was written for. Page p holding logical block L is live exactly when the map still says L → p. Page 2 holds 2000 and the map says 2000 → 2, so it is live. Page 0 holds 100, but the map says 100 → 4, so it is dead. One map lookup per page decides it. <span class="src">OSTEP 44.8</span></p>
+  <p>The best victim is a block with no live pages at all: it can be erased at once, with nothing to copy. The worst is a block that is almost entirely live, because the collector pays to copy nearly a whole block and wins back almost nothing. §3 turns this observation into a number. <span class="src">OSTEP 44.8</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>GC = pick a victim, copy its live pages to the log, erase it. It runs when free blocks fall to a threshold, not when one block fills, and the victim is a full block, usually the one with the fewest live pages. A page is live exactly when the map still points at it; the page's OOB note says which logical block it holds. The copies are the cost.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>How many extra writes does garbage collection cost?</h2><span class="tag t-ks">★ core · keystone</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>Needed: the result, WA = 1/(1−u), and links 1–4a of Figure 3. The papers call this number DLWA, device-level write amplification, and Kangaroo's Figure 2 measures the curve on a 1.9 TB drive: about 1× at 50% utilization, about 10× at 100%. Link 4a is their write budget, quoted as device-writes per day (§10.3). In a cache, u is partly a choice: <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.4</a>, <a href="2026-10-08-storage-4-log-structured-file-system.html#fig-evict">Figure 14</a>. Skip for the papers: the proof steps (keep the result) and link 4b.</p>
+
+  <div class="claimbox" id="proof">
+    <span class="lbl">KEYSTONE · CLAIM</span>
+    <p><b>Suppose the SSD runs in steady state: free pages come only from garbage collection, the free pool is the same size after each reclaim as before it, and every victim block of N pages holds a fraction u of live pages (0 ≤ u &lt; 1). Then the write amplification is WA = 1/(1−u), whatever the block size N.</b></p>
+  </div>
+  <p>The copies in Figure 2 are flash writes the client never asked for, so they raise write amplification (page ② §5). The box at the bottom of Figure 2 counts them for one reclaim: 2 copies, after which 2 free pages serve the client, so 4 programs for 2 client pages, WA = 2. The steps below show the count depends on u alone.</p>
+  <ol class="steps">
+    <li><div class="st"><b>WA = (bytes the FTL writes to flash) ÷ (bytes the client asked to write).</b><span>This is OSTEP's definition (44.5). Reads and erases are not in it; they show up as time and as wear. With equal-size pages, bytes can be counted as page programs.</span></div></li>
+    <li><div class="st"><b>One reclaim programs exactly uN pages.</b><span>The victim holds N pages, of which uN are live by assumption. Each live page is read and programmed once at the head of the log; dead pages are skipped.</span></div></li>
+    <li><div class="st"><b>One reclaim frees N pages and uses up uN, so its net gain is (1−u)N free pages.</b><span>The erase returns all N pages of the victim, and the uN copies went into pages that had been free.</span></div></li>
+    <li><div class="st"><b>Between two reclaims the client writes exactly (1−u)N pages.</b><span>Steady state means the free pool does not change over one cycle. The only consumers of free pages are the client's writes and the copies, and the copies are already counted in step 3, so the client's writes must use up exactly the net gain.</span></div></li>
+    <li><div class="st"><b>Flash programs per cycle = (1−u)N + uN = N.</b><span>Client pages from step 4 plus copies from step 2.</span></div></li>
+    <li><div class="st"><b>WA = N ÷ ((1−u)N) = 1/(1−u).</b><span>Step 5 divided by step 4, by the definition in step 1. N cancels, so the result holds for 4-page toy blocks and 64-page real ones alike. <span class="qed">∎</span></span></div></li>
+    <li><div class="st"><b>Check against Figure 2: u = 2/4, and the box counts 4 programs for 2 client pages, WA = 2 = 1/(1−0.5).</b><span>The formula and the hand count agree.</span></div></li>
+  </ol>
+
+  <div class="figure" id="fig-wa">
+    <div class="scroll">
+      <svg viewBox="0 0 760 1016" width="760" role="img" aria-label="Top: write amplification 1/(1-u) against u, gentle up to 0.5 and steep after 0.8. Bottom: the points u = 0.5 and u = 0.9 on a toy drive of 10 blocks of 10 pages, through four links: how full the flash is sets the victim's u, u sets WA through one GC cycle, WA is flash gigabytes per client gigabyte, and since every cycle erases one block, WA sets how many client pages the erase budget buys">
+        <text x="16" y="18" font-size="12.5" class="ink" font-weight="600">① The formula as a curve: cheap on the left, exploding near u = 1</text>
+        <g transform="translate(0,26)">
+        <g class="ln"><path d="M60 30 V260"/><path d="M60 260 H700"/><path d="M60 211.6 H700" stroke-dasharray="3 4"/><path d="M60 151.1 H700" stroke-dasharray="3 4"/><path d="M60 90.6 H700" stroke-dasharray="3 4"/><path d="M60 30 H700" stroke-dasharray="3 4"/></g>
+        <g font-size="11" class="mono mut" text-anchor="end"><text x="52" y="264">1</text><text x="52" y="215">5</text><text x="52" y="155">10</text><text x="52" y="94">15</text><text x="52" y="34">20</text></g>
+        <g font-size="11" class="mono mut" text-anchor="middle"><text x="60" y="278">0</text><text x="220" y="278">0.25</text><text x="380" y="278">0.5</text><text x="540" y="278">0.75</text><text x="700" y="278">1</text></g>
+        <text x="380" y="296" font-size="12" class="ink2" text-anchor="middle">u = live fraction of the victim block  ≈  share of the flash holding live data (link 1)</text>
+        <text x="16" y="18" font-size="12" class="ink2"><tspan font-weight="600">WA</tspan> = flash GB written per client GB (link 3)</text>
+        <path d="M60 260 L124 258.7 L188 257 L252 254.8 L316 251.9 L380 247.9 L444 241.8 L508 231.8 L540 223.7 L572 211.6 L604 191.4 L636 151.1 L652 110.7 L668 30" style="fill:none;stroke:var(--violet);stroke-width:2.4"/>
+        <circle cx="380" cy="247.9" r="5" class="vios"/><text x="380" y="236" font-size="12" class="vio" text-anchor="middle" font-weight="600">u = 0.5 → 2  (read in ②)</text>
+        <circle cx="572" cy="211.6" r="5" class="vios"/><text x="560" y="204" font-size="12" class="vio" text-anchor="end" font-weight="600">0.8 → 5</text>
+        <circle cx="636" cy="151.1" r="5" class="vios"/><text x="624" y="146" font-size="12" class="vio" text-anchor="end" font-weight="600">0.9 → 10  (read in ②)</text>
+        <circle cx="668" cy="30" r="5" class="vios"/><text x="656" y="36" font-size="12" class="vio" text-anchor="end" font-weight="600">0.95 → 20</text>
+        <text x="80" y="112" font-size="12" class="ink2">cheap while the flash is far from full: the victim is mostly dead;</text>
+        <text x="80" y="130" font-size="12" class="ink2">a full drive with no spare flash sits at the right end, which hidden</text>
+        <text x="80" y="148" font-size="12" class="ink2">spare flash prevents</text>
+        <a href="#s4"><rect x="196" y="135" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="213" y="148" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">§4</text></a>
+        </g>
+        <path d="M16 336 H744" class="ln"/>
+        <text x="16" y="358" font-size="12.5" class="ink" font-weight="600">② What the two axes mean: the points u = 0.5 and u = 0.9, read through four links</text>
+        <text x="16" y="376" font-size="11" class="ink2">Toy drive: 10 blocks × 10 pages = 100 pages (N cancels in the proof, so 10-page blocks give the same WA as real ones).</text>
+        <rect x="16" y="390" width="10" height="10" class="ambs"/><text x="31" y="399" font-size="11" class="ink2">live page / GC copy</text>
+        <rect x="146" y="390" width="10" height="10" style="fill:var(--stop);stroke:var(--stop)"/><text x="161" y="399" font-size="11" class="ink2">dead page</text>
+        <rect x="236" y="390" width="10" height="10" class="accs"/><text x="251" y="399" font-size="11" class="ink2">client page</text>
+        <text x="186" y="426" font-size="12" class="ink" font-weight="600">flash half full (u = 0.5)</text>
+        <text x="470" y="426" font-size="12" class="ink" font-weight="600">flash 90% full (u = 0.9)</text>
+        <path d="M16 438 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="456" font-size="11.5" class="ink" font-weight="600">1 · how full → u</text>
+        <text x="16" y="472" font-size="10.5" class="ink2">GC wins back only dead pages;</text>
+        <text x="16" y="486" font-size="10.5" class="ink2">live pages are luggage it must</text>
+        <text x="16" y="500" font-size="10.5" class="ink2">copy. The victim's u never</text>
+        <text x="16" y="514" font-size="10.5" class="ink2">exceeds the average (§4).</text>
+        <rect x="190" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="190" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="190" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="190" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="190" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="190" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="190" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="190" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="190" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="190" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="201" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="477" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="201" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="201" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="201" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="201" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="212" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="212" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="212" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="212" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="212" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="223" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="223" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="223" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="223" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="223" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="234" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="234" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="234" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="234" y="477" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="234" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="234" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="234" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="234" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="234" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="234" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="245" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="245" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="245" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="245" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="245" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="245" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="245" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="245" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="245" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="245" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="256" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="256" y="477" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="256" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="256" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="256" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="267" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="267" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="267" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="267" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="267" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="278" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="278" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="477" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="278" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="278" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="278" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="289" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="289" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="289" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="289" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="289" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="474" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="477" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="474" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="474" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="513" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="485" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="485" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="450" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="496" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="496" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="495" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="507" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="507" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="518" y="531" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="529" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="468" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="529" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="529" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="504" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="540" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="540" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="486" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="551" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="551" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="459" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="562" y="522" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="562" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="450" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="459" width="7" height="8" style="fill:var(--stop);stroke:var(--stop)" stroke-width="0.6"/>
+        <rect x="573" y="468" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="477" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="486" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="495" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="504" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="513" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="522" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <rect x="573" y="531" width="7" height="8" class="ambs" stroke-width="0.6"/>
+        <text x="308" y="464" font-size="11" class="ink2">50 of 100 pages hold live data</text>
+        <text x="308" y="479" font-size="11" class="ink2">per block: 5 live, 5 dead</text>
+        <text x="308" y="494" font-size="11" class="ink" font-weight="600">any victim: u = 5/10 = 0.5</text>
+        <text x="592" y="464" font-size="11" class="ink2">90 of 100 pages hold live data</text>
+        <text x="592" y="479" font-size="11" class="ink2">per block: 9 live, 1 dead</text>
+        <text x="592" y="494" font-size="11" class="ink" font-weight="600">any victim: u = 9/10 = 0.9</text>
+        <text x="308" y="516" font-size="10" class="mut">dead pages spread evenly: the</text>
+        <text x="308" y="529" font-size="10" class="mut">worst case; greedy does better</text>
+        <path d="M16 550 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="568" font-size="11.5" class="ink" font-weight="600">2 · u → WA</text>
+        <text x="16" y="584" font-size="10.5" class="ink2">One GC cycle: copy the victim's</text>
+        <text x="16" y="598" font-size="10.5" class="ink2">live pages, erase it; the client</text>
+        <text x="16" y="612" font-size="10.5" class="ink2">gets the free pages left over</text>
+        <text x="16" y="626" font-size="10.5" class="ink2">(the §3 proof with N = 10).</text>
+        <text x="186" y="564" font-size="10.5" class="mut">one cycle's 10 page programs:</text>
+        <text x="470" y="564" font-size="10.5" class="mut">one cycle's 10 page programs:</text>
+        <rect x="186" y="570" width="20" height="16" class="ambs"/>
+        <rect x="208" y="570" width="20" height="16" class="ambs"/>
+        <rect x="230" y="570" width="20" height="16" class="ambs"/>
+        <rect x="252" y="570" width="20" height="16" class="ambs"/>
+        <rect x="274" y="570" width="20" height="16" class="ambs"/>
+        <rect x="296" y="570" width="20" height="16" class="accs"/>
+        <rect x="318" y="570" width="20" height="16" class="accs"/>
+        <rect x="340" y="570" width="20" height="16" class="accs"/>
+        <rect x="362" y="570" width="20" height="16" class="accs"/>
+        <rect x="384" y="570" width="20" height="16" class="accs"/>
+        <rect x="470" y="570" width="20" height="16" class="ambs"/>
+        <rect x="492" y="570" width="20" height="16" class="ambs"/>
+        <rect x="514" y="570" width="20" height="16" class="ambs"/>
+        <rect x="536" y="570" width="20" height="16" class="ambs"/>
+        <rect x="558" y="570" width="20" height="16" class="ambs"/>
+        <rect x="580" y="570" width="20" height="16" class="ambs"/>
+        <rect x="602" y="570" width="20" height="16" class="ambs"/>
+        <rect x="624" y="570" width="20" height="16" class="ambs"/>
+        <rect x="646" y="570" width="20" height="16" class="ambs"/>
+        <rect x="668" y="570" width="20" height="16" class="accs"/>
+        <text x="186" y="602" font-size="11" class="ink2">5 copies + 5 client pages = 10</text>
+        <text x="186" y="617" font-size="11" class="ink" font-weight="600">WA = 10 ÷ 5 = 2</text>
+        <text x="470" y="602" font-size="11" class="ink2">9 copies + 1 client page = 10</text>
+        <text x="470" y="617" font-size="11" class="ink" font-weight="600">WA = 10 ÷ 1 = 10</text>
+        <path d="M16 634 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="652" font-size="11.5" class="ink" font-weight="600">3 · WA → flash writes</text>
+        <text x="16" y="668" font-size="10.5" class="ink2">WA is a ratio: the same per</text>
+        <text x="16" y="682" font-size="10.5" class="ink2">page and per GB.</text>
+        <text x="186" y="648" font-size="10.5" class="mut">the client writes 1 GB; flash writes:</text>
+        <text x="470" y="648" font-size="10.5" class="mut">the client writes 1 GB; flash writes:</text>
+        <rect x="186" y="654" width="20" height="14" class="accs"/>
+        <rect x="208" y="654" width="20" height="14" class="ambs"/>
+        <rect x="470" y="654" width="20" height="14" class="accs"/>
+        <rect x="492" y="654" width="20" height="14" class="ambs"/>
+        <rect x="514" y="654" width="20" height="14" class="ambs"/>
+        <rect x="536" y="654" width="20" height="14" class="ambs"/>
+        <rect x="558" y="654" width="20" height="14" class="ambs"/>
+        <rect x="580" y="654" width="20" height="14" class="ambs"/>
+        <rect x="602" y="654" width="20" height="14" class="ambs"/>
+        <rect x="624" y="654" width="20" height="14" class="ambs"/>
+        <rect x="646" y="654" width="20" height="14" class="ambs"/>
+        <rect x="668" y="654" width="20" height="14" class="ambs"/>
+        <text x="238" y="665" font-size="11" class="ink" font-weight="600">2 GB</text>
+        <text x="696" y="665" font-size="11" class="ink" font-weight="600">10 GB</text>
+        <text x="186" y="684" font-size="11" class="ink2">1 GB client + 1 GB of GC copies</text>
+        <text x="470" y="684" font-size="11" class="ink2">1 GB client + 9 GB of GC copies</text>
+        <path d="M16 698 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="716" font-size="11.5" class="ink" font-weight="600">4a · erases → lifetime</text>
+        <text x="16" y="732" font-size="10.5" class="ink2">Flash wears per erase, not per</text>
+        <text x="16" y="746" font-size="10.5" class="ink2">year: a block lasts ~10,000</text>
+        <text x="16" y="760" font-size="10.5" class="ink2">erases (page ② §4). Toy budget:</text>
+        <text x="16" y="774" font-size="10.5" class="ink2">10 × 10,000 = 100,000 erases.</text>
+        <text x="16" y="788" font-size="10.5" class="ink2">A block cannot tell a client</text>
+        <text x="16" y="802" font-size="10.5" class="ink2">page from a GC copy.</text>
+        <text x="186" y="716" font-size="11" class="ink2">each cycle erases exactly 1 block;</text>
+        <text x="186" y="731" font-size="11" class="ink2">here that erase buys 5 client pages:</text>
+        <text x="186" y="746" font-size="11" class="ink" font-weight="600">0.2 erase per client page</text>
+        <text x="186" y="761" font-size="11" class="ink2">client pages before wear-out:</text>
+        <text x="186" y="776" font-size="11" class="ink" font-weight="600">100,000 ÷ 0.2 = 500,000</text>
+        <text x="470" y="716" font-size="11" class="ink2">each cycle erases exactly 1 block;</text>
+        <text x="470" y="731" font-size="11" class="ink2">here that erase buys 1 client page:</text>
+        <text x="470" y="746" font-size="11" class="ink" font-weight="600">1 erase per client page</text>
+        <text x="470" y="761" font-size="11" class="ink2">client pages before wear-out:</text>
+        <text x="470" y="776" font-size="11" class="ink" font-weight="600">100,000 ÷ 1 = 100,000</text>
+        <rect x="186" y="786" width="250" height="14" class="accs"/>
+        <rect x="470" y="786" width="50" height="14" class="accs"/>
+        <text x="528" y="797" font-size="10.5" class="ink2">a fifth of the left drive's</text>
+        <text x="186" y="816" font-size="10.5" class="mut">same 100,000 erases in both drives; what differs is how much the client wrote before they ran out</text>
+        <path d="M16 830 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="848" font-size="11.5" class="ink" font-weight="600">4b · time → speed</text>
+        <text x="16" y="864" font-size="10.5" class="ink2">One program takes ~0.2 ms</text>
+        <text x="16" y="878" font-size="10.5" class="ink2">(page ② §4), so a chip does</text>
+        <text x="16" y="892" font-size="10.5" class="ink2">~5,000 a second. Client pages</text>
+        <text x="16" y="906" font-size="10.5" class="ink2">and GC copies share that time;</text>
+        <text x="16" y="920" font-size="10.5" class="ink2">the chip cannot tell them apart.</text>
+        <text x="186" y="848" font-size="11" class="ink2">of every 10 programs, 5 are the client's:</text>
+        <text x="186" y="863" font-size="11" class="ink" font-weight="600">half of the chip's time</text>
+        <text x="186" y="878" font-size="11" class="ink2">client pages per second:</text>
+        <text x="186" y="893" font-size="11" class="ink" font-weight="600">5,000 ÷ 2 = 2,500</text>
+        <text x="470" y="848" font-size="11" class="ink2">of every 10 programs, 1 is the client's:</text>
+        <text x="470" y="863" font-size="11" class="ink" font-weight="600">a tenth of the chip's time</text>
+        <text x="470" y="878" font-size="11" class="ink2">client pages per second:</text>
+        <text x="470" y="893" font-size="11" class="ink" font-weight="600">5,000 ÷ 10 = 500</text>
+        <rect x="186" y="904" width="250" height="14" class="accs"/>
+        <rect x="470" y="904" width="50" height="14" class="accs"/>
+        <text x="528" y="915" font-size="10.5" class="ink2">a fifth of the left drive's</text>
+        <text x="186" y="934" font-size="10.5" class="mut">once free blocks run out, a client page</text>
+        <text x="186" y="948" font-size="10.5" class="mut">waits for 2 programs, ≈ 0.4 ms</text>
+        <text x="470" y="934" font-size="10.5" class="mut">once free blocks run out, a client page</text>
+        <text x="470" y="948" font-size="10.5" class="mut">waits for 10 programs, ≈ 2 ms, plus an erase</text>
+        <rect x="10" y="962" width="740" height="44" rx="8" class="vios"/>
+        <text x="24" y="980" font-size="12" class="ink" font-weight="600">Two budgets, one divisor. GC copies spend both exactly as client writes do:</text>
+        <text x="24" y="997" font-size="12" class="vio" font-weight="600">client data before wear-out = erase budget ÷ WA  ·  client write speed = flash write speed ÷ WA</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 3. ① WA = 1/(1−u): halving the dead part of the victim doubles the cost, so going from u = 0.8 to u = 0.9 takes WA from 5 to 10. ② The curve's two marked points, u = 0.5 and u = 0.9, followed through the four links that turn u into what the drive pays: how full the flash is → the victim's u → WA → flash writes per client write → two budgets: client data before the erases run out (4a) and client write speed (4b).</p>
+  </div>
+
+  <p><b>Read the curve (①) from the left.</b> A victim that is mostly dead (u near 0) costs almost nothing extra, so WA is near 1. A victim that is half live doubles every write. Past that the curve turns steep: going from u = 0.8 to u = 0.9 halves the dead part of the victim and doubles WA, from 5 to 10.</p>
+  <p><b>What the two axes mean (②).</b> The proof turns u into WA, but neither number says by itself what the drive pays. Four links connect them, and ② follows the curve's two marked points, u = 0.5 and u = 0.9, through all four on a toy drive of 10 blocks × 10 pages.</p>
+  <p><b>Link 1: how full the flash is sets u.</b> GC wins back only dead pages; live pages are luggage it must copy. If 90 of the toy drive's 100 pages hold live data, at most 10 are dead. Spread evenly, every block holds 9 live pages and 1 dead one, so whichever block GC takes has u = 0.9. Spread unevenly, the greedy collector finds a better block, but never one above the average (§4). So u reads, roughly, as the share of the flash that holds live data.</p>
+  <p><b>Link 2: u sets WA.</b> One cycle at u = 0.9 copies the victim's 9 live pages and erases it. The erase returns 10 free pages and the copies used up 9, so the net gain is 1 page, which the client fills. That is 10 programs for 1 client page, WA = 10. At u = 0.5 the cycle copies 5 and leaves 5 for the client, WA = 2. This is the proof's count with N = 10.</p>
+  <p><b>Link 3: WA is flash writing per client write.</b> WA is a ratio, so it holds per page and per gigabyte alike. At WA = 10, a client's 1 GB costs 10 GB of flash programs, and 9 GB of them are GC's copies, which the client never asked for.</p>
+  <p><b>Link 4a: flash writing spends lifetime.</b> Flash wears per erase, not per year: a drive that is never written barely wears, and a block lasts about 10,000 erases (<a href="2026-10-08-storage-2-flash-and-ftl.html#s4">page ②, §4</a>). An SSD's lifetime is therefore counted in how much the client can write before the erases run out, much as a car wears by the kilometres it is driven, not by the years it stands parked. Every GC cycle erases exactly one block, whatever u is. What u changes is how many client pages that one erase buys: 5 at u = 0.5, 1 at u = 0.9. A client page thus costs 0.2 of an erase on the half-full drive and a whole erase on the 90%-full one. The toy drive holds 10 × 10,000 = 100,000 erases, and both drives wear out when those are gone; by then the half-full drive has taken 500,000 client pages and the 90%-full one 100,000. A block cannot tell a client page from a GC copy, so the copies spend the erase budget exactly as the client's own writes do.</p>
+  <p><b>Link 4b: flash writing spends time.</b> The flash has a second budget, and it is time. One program takes a few hundred microseconds (<a href="2026-10-08-storage-2-flash-and-ftl.html#s4">page ②, §4</a>); at about 0.2 ms, a chip can do about 5,000 programs a second. Client pages and GC copies share those programs, and the chip cannot tell them apart any more than a block can. At u = 0.5, 5 of every 10 programs are the client's, so the client gets 2,500 pages a second; at u = 0.9 only 1 of every 10 is, so the client gets 500. While free blocks remain, GC can wait for idle moments (§2) and a short burst of writes never notices. Under sustained writing the stock runs out, and from then on each client page waits for its share of the copies: about 2 programs (≈ 0.4 ms) at u = 0.5, 10 programs (≈ 2 ms) plus an erase at u = 0.9, and about 100 programs, some 20 ms, at u = 0.99, against 0.2 ms for a write into a free page. That is the sudden slowdown of a full SSD under steady writes. Real drives program on dozens of chips at once, but client pages and copies share all of them alike, so the client's share stays 1/WA.</p>
+  <p><b>Scaled to a real drive.</b> <a href="2026-10-08-storage-2-flash-and-ftl.html#fig-wa">Page ②, Figure 11</a> gave a 1 TB drive a budget of 1 TB × 10,000 erases = 10,000 TB of flash programs. The client's share of it, and of the flash's write speed, is divided by WA.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>SHARE OF THE FLASH HOLDING LIVE DATA</th><th>VICTIM u (CEILING)</th><th>WA</th><th>FLASH WRITTEN PER CLIENT GB</th><th>CLIENT DATA BEFORE WEAR-OUT</th><th>CLIENT SHARE OF WRITE SPEED</th></tr></thead>
+      <tbody>
+        <tr><td class="c">50%</td><td class="c">0.5</td><td class="c">2</td><td class="c">2 GB</td><td class="c">5,000 TB</td><td class="c">1/2</td></tr>
+        <tr><td class="c">80%</td><td class="c">0.8</td><td class="c">5</td><td class="c">5 GB</td><td class="c">2,000 TB</td><td class="c">1/5</td></tr>
+        <tr><td class="c">90%</td><td class="c">0.9</td><td class="c">10</td><td class="c">10 GB</td><td class="c">1,000 TB</td><td class="c">1/10</td></tr>
+        <tr><td class="c">95%</td><td class="c">0.95</td><td class="c">20</td><td class="c">20 GB</td><td class="c">500 TB</td><td class="c">1/20</td></tr>
+        <tr><td class="c">100%</td><td class="c">1</td><td class="c">no bound</td><td class="c">—</td><td colspan="2">none: every page is live, so GC frees nothing and the drive cannot take writes</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The u column is the ceiling from link 1; a greedy collector usually does better, so a real drive at these levels fares somewhat better than its row. <span class="src">budget: page ② Figure 11 · rows: arithmetic on WA = 1/(1−u)</span></p>
+  <p><b>What the curve says, then.</b> The cost does not grow evenly with fullness. Up to half full it barely moves. Past 80% it doubles twice within fifteen points, from 80% to 90% and again from 90% to 95%, and that last step of five points halves the client's lifetime, from 1,000 TB to 500 TB. A designer cannot let a drive sit at the right end of the curve, yet clients do fill their drives. So SSDs hide spare flash the client never sees (§4): with 10% hidden, a client who fills every advertised byte still leaves the flash 90% full, and the drive stays on the 90% row.</p>
+  <p class="gist ks"><span class="lbl">CARRY</span>WA = 1/(1−u), where u is the victim's live fraction, roughly the share of the flash holding live data: 0.5 → 2, 0.8 → 5, 0.9 → 10. GC copies spend the flash's two budgets exactly as client writes do: client data before wear-out = erase budget ÷ WA, and client write speed = flash write speed ÷ WA. Everything after this section is a way to keep u small.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>What sets u, and how do trim and overprovisioning lower it?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>Needed: the bound and overprovisioning (Figure 4, top and ③). "Utilization" and "over-provisioning" are daily words in the papers: CacheLib leaves its small-object flash 50% overprovisioned, and Nemo's analysis varies the OP ratio from 5% to 50%. Skip: the toy drive (④). Trim matters only for FairyWREN's Erase command (<a href="2026-10-08-storage-3-5-flash-caches.html#words">page 3.5’s word table</a>). The untrimmed delete returns one layer up, as a drive copying sets the cache is about to rewrite: <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.7</a>.</p>
+
+  <div class="figure" id="fig-u">
+    <div class="scroll">
+      <svg viewBox="0 0 760 670" width="760" role="img" aria-label="Top: the bound u at most L over P full, with the lever on each part: greedy gives the inequality, trim shrinks L, overprovisioning grows P full. Then: eight full blocks where greedy picks the emptiest; trim turning a deleted file's pages dead; hidden spare flash capping u; and the three on a toy drive of 100 pages">
+        <defs><marker id="h3t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">The task §3 left: keep u small. Figure 3 ② read u as how full the flash is; exactly:</text>
+        <rect x="16" y="32" width="282" height="64" rx="6" class="vios"/>
+        <text x="157" y="62" font-size="20" class="mono vio" font-weight="600" text-anchor="middle">u ≤ L ÷ P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3"></tspan></text>
+        <text x="157" y="84" font-size="10.5" class="ink2" text-anchor="middle">L = live pages · P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3"> = pages in full blocks</tspan></text>
+        <text x="316" y="46" font-size="12" class="ink2"><tspan class="ink" font-weight="600">① greedy</tspan> gives the ≤: the emptiest block is at most the average</text>
+        <text x="316" y="68" font-size="12" class="ink2"><tspan class="ink" font-weight="600">② trim</tspan> shrinks L: data the client deleted stops counting as live</text>
+        <text x="316" y="90" font-size="12" class="ink2"><tspan class="ink" font-weight="600">③ overprovisioning</tspan> grows P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3">: flash the client can never fill</tspan></text>
+        <path d="M16 110 H744" class="ln"/>
+        <text x="16" y="138" font-size="12" class="ink" font-weight="600">① Greedy picks the full block with the fewest live pages</text>
+        <rect x="16" y="152" width="20" height="36" class="ambs"/>
+        <rect x="36" y="152" width="20" height="36" class="ambs"/>
+        <rect x="56" y="152" width="20" height="36" class="ambs"/>
+        <rect x="76" y="152" width="20" height="36" class="ambs"/>
+        <rect x="108" y="152" width="20" height="36" class="ambs"/>
+        <rect x="128" y="152" width="20" height="36" class="ambs"/>
+        <rect x="148" y="152" width="20" height="36" class="ambs"/>
+        <rect x="168" y="152" width="20" height="36" class="stps"/>
+        <rect x="200" y="152" width="20" height="36" class="ambs"/>
+        <rect x="220" y="152" width="20" height="36" class="stps"/>
+        <rect x="240" y="152" width="20" height="36" class="stps"/>
+        <rect x="260" y="152" width="20" height="36" class="stps"/>
+        <rect x="292" y="152" width="20" height="36" class="ambs"/>
+        <rect x="312" y="152" width="20" height="36" class="ambs"/>
+        <rect x="332" y="152" width="20" height="36" class="ambs"/>
+        <rect x="352" y="152" width="20" height="36" class="stps"/>
+        <rect x="384" y="152" width="20" height="36" class="ambs"/>
+        <rect x="404" y="152" width="20" height="36" class="ambs"/>
+        <rect x="424" y="152" width="20" height="36" class="stps"/>
+        <rect x="444" y="152" width="20" height="36" class="stps"/>
+        <rect x="476" y="152" width="20" height="36" class="ambs"/>
+        <rect x="496" y="152" width="20" height="36" class="ambs"/>
+        <rect x="516" y="152" width="20" height="36" class="ambs"/>
+        <rect x="536" y="152" width="20" height="36" class="ambs"/>
+        <rect x="568" y="152" width="20" height="36" class="ambs"/>
+        <rect x="588" y="152" width="20" height="36" class="ambs"/>
+        <rect x="608" y="152" width="20" height="36" class="ambs"/>
+        <rect x="628" y="152" width="20" height="36" class="stps"/>
+        <rect x="660" y="152" width="20" height="36" class="ambs"/>
+        <rect x="680" y="152" width="20" height="36" class="ambs"/>
+        <rect x="700" y="152" width="20" height="36" class="stps"/>
+        <rect x="720" y="152" width="20" height="36" class="stps"/>
+        <rect x="196" y="148" width="88" height="44" rx="3" style="fill:none;stroke:var(--violet);stroke-width:2.5"/>
+        <text x="56" y="206" font-size="11" text-anchor="middle" class="mono ink2">u = 4/4</text>
+        <text x="148" y="206" font-size="11" text-anchor="middle" class="mono ink2">3/4</text>
+        <text x="240" y="206" font-size="11" text-anchor="middle" class="mono vio" font-weight="600">1/4</text>
+        <text x="332" y="206" font-size="11" text-anchor="middle" class="mono ink2">3/4</text>
+        <text x="424" y="206" font-size="11" text-anchor="middle" class="mono ink2">2/4</text>
+        <text x="516" y="206" font-size="11" text-anchor="middle" class="mono ink2">4/4</text>
+        <text x="608" y="206" font-size="11" text-anchor="middle" class="mono ink2">3/4</text>
+        <text x="700" y="206" font-size="11" text-anchor="middle" class="mono ink2">2/4</text>
+        <text x="16" y="228" font-size="12" class="ink">Greedy victim: u = 1/4. Average over all eight: L ÷ P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3"> = 22 ÷ 32 ≈ 0.69.</tspan></text>
+        <text x="16" y="246" font-size="12" class="vio" font-weight="600">The minimum is never above the average, so the greedy victim always has u ≤ L ÷ P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3">.</tspan></text>
+        <path d="M16 260 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="282" font-size="12" class="ink" font-weight="600">② Trim lowers L: the file system deleted a file, but nothing told the SSD</text>
+        <text x="36" y="301" font-size="10" class="stp" text-anchor="middle">deleted file</text>
+        <rect x="16" y="306" width="20" height="30" style="fill:var(--amber-soft);stroke:var(--stop);stroke-width:1.6;stroke-dasharray:3 2"/>
+        <rect x="36" y="306" width="20" height="30" style="fill:var(--amber-soft);stroke:var(--stop);stroke-width:1.6;stroke-dasharray:3 2"/>
+        <rect x="56" y="306" width="20" height="30" class="stps"/>
+        <rect x="76" y="306" width="20" height="30" class="ambs"/>
+        <path d="M104 321 L168 321" class="arr" marker-end="url(#h3t)"/>
+        <text x="136" y="313" font-size="10" class="ink2" text-anchor="middle">trim</text>
+        <rect x="176" y="306" width="20" height="30" class="stps"/>
+        <rect x="196" y="306" width="20" height="30" class="stps"/>
+        <rect x="216" y="306" width="20" height="30" class="stps"/>
+        <rect x="236" y="306" width="20" height="30" class="ambs"/>
+        <text x="276" y="310" font-size="12" class="ink2">before trim: the SSD's map still points at the deleted file's pages,</text>
+        <text x="276" y="326" font-size="12" class="ink2">so they count as live and GC would keep copying them;</text>
+        <text x="276" y="342" font-size="12" class="ink2">after trim: entries dropped, pages dead, L falls by 2 with no copying</text>
+        <path d="M16 356 H744" class="ln" stroke-dasharray="2 4"/>
+        <text x="16" y="378" font-size="12" class="ink" font-weight="600">③ Overprovisioning raises P<tspan font-size="9" dy="3">full</tspan><tspan dy="-3">: hidden flash that can never hold advertised data</tspan></text>
+        <rect x="16" y="388" width="540" height="24" class="ambs"/><rect x="556" y="388" width="60" height="24" class="accs"/>
+        <text x="24" y="404" font-size="11" class="ink">advertised capacity: at most this much is live</text>
+        <text x="561" y="404" font-size="10" class="ink">10% hidden</text>
+        <text x="630" y="404" font-size="12" class="vio" font-weight="600">u ≤ 0.9 → WA ≤ 10</text>
+        <rect x="16" y="422" width="450" height="24" class="ambs"/><rect x="466" y="422" width="150" height="24" class="accs"/>
+        <text x="24" y="438" font-size="11" class="ink">advertised capacity</text>
+        <text x="474" y="438" font-size="10" class="ink">25% hidden</text>
+        <text x="630" y="438" font-size="12" class="vio" font-weight="600">u ≤ 0.75 → WA ≤ 4</text>
+        <path d="M16 454 H744" class="ln"/>
+        <text x="16" y="474" font-size="12" class="ink" font-weight="600">④ All three on Figure 3's toy drive: 100 pages of flash, and what the SSD counts as live</text>
+        <rect x="16" y="486" width="10" height="10" class="ambs"/><text x="31" y="495" font-size="10.5" class="ink2">live</text>
+        <rect x="70" y="486" width="10" height="10" style="fill:var(--amber-soft);stroke:var(--stop);stroke-width:1.4;stroke-dasharray:3 2"/><text x="85" y="495" font-size="10.5" class="ink2">deleted, no trim: still counted live</text>
+        <rect x="290" y="486" width="10" height="10" class="stps"/><text x="305" y="495" font-size="10.5" class="ink2">dead</text>
+        <rect x="346" y="486" width="10" height="10" class="accs"/><text x="361" y="495" font-size="10.5" class="ink2">hidden spare flash</text>
+        <rect x="16" y="508" width="400" height="26" class="ambs"/>
+        <text x="430" y="518" font-size="11" class="ink2">a. nothing hidden, all 100 filled: writes stop</text>
+        <text x="430" y="533" font-size="11.5" class="vio" font-weight="600">counted live 100 of 100: u ≤ 1, WA unbounded</text>
+        <rect x="16" y="548" width="360" height="26" class="ambs"/>
+        <rect x="376" y="548" width="40" height="26" class="accs"/>
+        <text x="430" y="558" font-size="11" class="ink2">b. 10 hidden; the client fills all 90 it sees</text>
+        <text x="430" y="573" font-size="11.5" class="vio" font-weight="600">counted live 90 of 100: u ≤ 0.9, WA ≤ 10</text>
+        <rect x="16" y="588" width="280" height="26" class="ambs"/>
+        <rect x="296" y="588" width="80" height="26" style="fill:var(--amber-soft);stroke:var(--stop);stroke-width:1.6;stroke-dasharray:4 3"/>
+        <rect x="376" y="588" width="40" height="26" class="accs"/>
+        <text x="430" y="598" font-size="11" class="ink2">c. then a 20-page file is deleted, no trim</text>
+        <text x="430" y="613" font-size="11.5" class="vio" font-weight="600">still counted live 90: u ≤ 0.9, WA ≤ 10</text>
+        <rect x="16" y="628" width="280" height="26" class="ambs"/>
+        <rect x="296" y="628" width="80" height="26" class="stps"/>
+        <rect x="376" y="628" width="40" height="26" class="accs"/>
+        <text x="430" y="638" font-size="11" class="ink2">d. the same delete, sent as trim</text>
+        <text x="430" y="653" font-size="11.5" class="vio" font-weight="600">counted live 70 of 100: u ≤ 0.7, WA ≤ 3.3</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 4. Top: the bound u ≤ L ÷ P<sub>full</sub> and the lever that works on each of its parts. ① Eight full 4-page blocks; amber pages are live, red pages dead; greedy picks the violet-outlined block. ② Trim turns a deleted file's pages dead without copying them. ③ With the advertised space completely full, hidden spare flash caps the live fraction of every block, and so caps WA. ④ The three levers on Figure 3's toy drive.</p>
+  </div>
+
+  <p>§3 left one task: keep u small. Figure 3 ② read u, roughly, as how full the flash is; this section makes that reading exact with one bound, u ≤ L ÷ P<sub>full</sub>, and each of the three levers works on one part of it (Figure 4, top).</p>
+  <p>The collector chooses its victim, and the simplest rule, called <b>greedy</b>, picks the full block with the fewest live pages. Greedy comes with a guarantee that needs nothing more than arithmetic. The minimum of a list is never above its average. The average live fraction over the full blocks is L ÷ P<sub>full</sub>, where L counts the live pages in full blocks and P<sub>full</sub> counts all pages in full blocks. So the greedy victim always has <b>u ≤ L ÷ P<sub>full</sub></b>. In Figure 4, ①, 22 of 32 pages are live, so u ≤ 0.69; the greedy victim actually has u = 1/4. <span class="src">the bound follows from the definitions · OSTEP 44.8 for the ideal all-dead victim</span></p>
+  <p>The bound shows the two ways to lower u: shrink L, or grow P<sub>full</sub>.</p>
+  <p><b>Trim shrinks L.</b> L counts what the SSD believes is live, and the SSD can believe too much. When a file is deleted, the file system marks its blocks free in its own records, but nothing tells the device. The SSD's map still points at those pages, so to the FTL they look live, and GC keeps copying data nobody will ever read. <b>Trim</b> is the command that tells the device a range of logical blocks is no longer needed. The FTL drops those map entries, the pages become garbage, and L falls without any copying (Figure 4, ②). A hard disk gains nothing from trim, because its mapping is fixed (page ① §3). For an SSD it is valuable, which OSTEP reads as a case of the implementation shaping the interface. <span class="src">OSTEP 44.8, aside on trim</span></p>
+  <p><b>Overprovisioning grows P<sub>full</sub>.</b> An SSD can be built with more flash than it advertises. L can never exceed the advertised capacity, since that is all the data the client can store, while P<sub>full</sub> counts the hidden flash too. With the advertised space completely full, hiding 10% of the flash gives u ≤ 0.9 and WA ≤ 10, and hiding 25% gives u ≤ 0.75 and WA ≤ 4 (Figure 4, ③). These are ceilings, and a greedy collector usually does better, because blocks are not all equally full. The spare space also lets cleaning wait for idle moments instead of running in front of client writes, and the extra chips add internal bandwidth for it. Many modern drives overprovision this way. <span class="src">OSTEP 44.8 · the two numbers are arithmetic on the bound</span></p>
+  <p>Figure 4, ④ runs all three on Figure 3's toy drive of 100 pages. With nothing hidden, a client who fills every page leaves no dead page anywhere, so GC can win nothing back and the drive stops taking writes (a). It could not even start: a collection needs a free block to copy the victim's live pages into, and none is left. This is one reason drives hide some flash (③). Hiding 10 pages caps u at 0.9 however full the client gets (b). If the client then deletes a 20-page file, the ceiling does not move, because the SSD has not heard about it (c). Sent as trim, the same delete turns those 20 pages dead at once, and the ceiling falls to 0.7, so WA ≤ 1/0.3 ≈ 3.3 (d).</p>
+  <p>u also depends on which data share a block. If data written together also dies together, whole blocks empty out at once and the victim's u is near 0. §10.1 comes back to this, because it is the SSD's reason to write sequentially.</p>
+  <p class="gist"><span class="lbl">CARRY</span>The greedy victim has u ≤ (live pages) ÷ (pages in full blocks), and each lever works on one part of that bound. Greedy supplies the ≤. Trim lowers the top: deleted data stops counting as live. Overprovisioning raises the bottom: hidden spare flash. 10% hidden → WA ≤ 10; 25% hidden → WA ≤ 4.</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="n">§5</span><h2>Why is the map so big, and does mapping whole blocks fix it?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>All of it. This is where the DRAM side of every paper starts: one map entry per unit, and fewer entries cost rewrites. The flash caches replay the same trade with objects in place of pages, and <a href="2026-10-08-storage-3-5-flash-caches.html#s7">page 3.5 §7</a> shows why it bites there. <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">Page ④ §12.3</a> lines it up with LFS's choice: an address computed (sets) or looked up in a map (a log).</p>
+
+  <div class="figure" id="fig-blockmap">
+    <div class="scroll">
+      <svg viewBox="0 0 760 694" width="760" role="img" aria-label="Top: direct mapping needs no table, the log moves data on every write so it needs a map, and one entry per page costs 1 GiB per terabyte. Then block-level mapping: logical blocks 2000 to 2003 share one map entry, chunk 500 to page 4; rewriting 2002 forces all four pages to move. Bottom: the trade between map size and rewrites">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">① Why a map at all: the log moves data, so the SSD must remember where it went</text>
+        <rect x="16" y="32" width="228" height="84" rx="6" class="surf"/>
+        <text x="26" y="50" font-size="11.5" class="ink" font-weight="600">direct mapping (page ②)</text>
+        <text x="26" y="70" font-size="11" class="ink2">logical 2002 = physical page 2002</text>
+        <text x="26" y="86" font-size="11" class="ink2">computed, so no table is needed</text>
+        <text x="26" y="102" font-size="11" class="ink2">(but every rewrite erases a block)</text>
+        <rect x="266" y="32" width="228" height="84" rx="6" class="ambs"/>
+        <text x="276" y="50" font-size="11.5" class="ink" font-weight="600">log-structured FTL (page ②)</text>
+        <text x="276" y="70" font-size="11" class="ink2">write 1: 2002 → page 6</text>
+        <text x="276" y="86" font-size="11" class="ink2">write 2: 2002 → page 10</text>
+        <text x="276" y="102" font-size="11" class="ink2">it moves on every write: a map</text>
+        <rect x="516" y="32" width="228" height="84" rx="6" class="stps"/>
+        <text x="526" y="50" font-size="11.5" class="ink" font-weight="600">one map entry per page</text>
+        <text x="526" y="70" font-size="11" class="ink2">1 TB ÷ 4 KB = 2²⁸ pages</text>
+        <text x="526" y="86" font-size="11" class="ink2">× 4 B per entry = 1 GiB of DRAM</text>
+        <text x="526" y="102" font-size="11" class="ink2">inside the SSD, for the map alone</text>
+        <path d="M246 74 L262 74" class="arr" marker-end="url(#h5a)"/><path d="M496 74 L512 74" class="arr" marker-end="url(#h5a)"/>
+        <defs><marker id="h5a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="140" font-size="12" class="vio" font-weight="600">This section's question: can the map have fewer entries, and what does that cost?</text>
+        <path d="M16 154 H744" class="ln"/>
+        <g transform="translate(0,160)">
+        <text x="16" y="22" font-size="12" class="ink" font-weight="600">② The fix: one map entry per block. Logical 2000–2003 (a, b, c, d) sit in block 1</text>
+        <g font-size="10" class="mono mut" text-anchor="middle"><text x="104" y="42">block 0</text><text x="290" y="42">block 1</text><text x="476" y="42">block 2</text></g>
+        <g>
+        <rect x="16" y="48" width="44" height="52" class="surf"/><rect x="60" y="48" width="44" height="52" class="surf"/><rect x="104" y="48" width="44" height="52" class="surf"/><rect x="148" y="48" width="44" height="52" class="surf"/>
+        <rect x="202" y="48" width="44" height="52" class="ambs"/><rect x="246" y="48" width="44" height="52" class="ambs"/><rect x="290" y="48" width="44" height="52" class="ambs"/><rect x="334" y="48" width="44" height="52" class="ambs"/>
+        <rect x="388" y="48" width="44" height="52" class="surf"/><rect x="432" y="48" width="44" height="52" class="surf"/><rect x="476" y="48" width="44" height="52" class="surf"/><rect x="520" y="48" width="44" height="52" class="surf"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="38" y="60">00</text><text x="82" y="60">01</text><text x="126" y="60">02</text><text x="170" y="60">03</text><text x="224" y="60">04</text><text x="268" y="60">05</text><text x="312" y="60">06</text><text x="356" y="60">07</text><text x="410" y="60">08</text><text x="454" y="60">09</text><text x="498" y="60">10</text><text x="542" y="60">11</text></g>
+        <g font-size="13" class="mono ink" text-anchor="middle"><text x="224" y="80">a</text><text x="268" y="80">b</text><text x="312" y="80" font-weight="600">c</text><text x="356" y="80">d</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="38" y="95">i</text><text x="82" y="95">i</text><text x="126" y="95">i</text><text x="170" y="95">i</text><text x="224" y="95">V</text><text x="268" y="95">V</text><text x="312" y="95">V</text><text x="356" y="95">V</text><text x="410" y="95">i</text><text x="454" y="95">i</text><text x="498" y="95">i</text><text x="542" y="95">i</text></g>
+        <rect x="590" y="40" width="160" height="96" rx="6" class="surf"/>
+        <text x="600" y="58" font-size="11" class="mut">map (one entry per block)</text>
+        <text x="600" y="82" font-size="13" class="mono ink" font-weight="600">chunk 500 → 4</text>
+        <text x="600" y="106" font-size="11" class="mut">a page map would</text>
+        <text x="600" y="122" font-size="11" class="mut">need 4 entries here</text>
+        <text x="16" y="124" font-size="11" class="ink2">read(2002): chunk = 2002 ÷ 4 = 500, offset = 2002 mod 4 = 2 → map[500] = 4 → page 4 + 2 = 6 → c</text>
+        <text x="16" y="170" font-size="12" class="ink" font-weight="600">③ The catch, write(2002) = c′: the whole chunk moves, so a, b and d are rewritten too</text>
+        <g>
+        <rect x="16" y="196" width="44" height="52" class="surf"/><rect x="60" y="196" width="44" height="52" class="surf"/><rect x="104" y="196" width="44" height="52" class="surf"/><rect x="148" y="196" width="44" height="52" class="surf"/>
+        <rect x="202" y="196" width="44" height="52" class="accs"/><rect x="246" y="196" width="44" height="52" class="accs"/><rect x="290" y="196" width="44" height="52" class="accs"/><rect x="334" y="196" width="44" height="52" class="accs"/>
+        <rect x="388" y="196" width="44" height="52" class="ambs"/><rect x="432" y="196" width="44" height="52" class="ambs"/><rect x="476" y="196" width="44" height="52" class="vios"/><rect x="520" y="196" width="44" height="52" class="ambs"/>
+        </g>
+        <g font-size="9" class="mono mut" text-anchor="middle"><text x="38" y="208">00</text><text x="82" y="208">01</text><text x="126" y="208">02</text><text x="170" y="208">03</text><text x="224" y="208">04</text><text x="268" y="208">05</text><text x="312" y="208">06</text><text x="356" y="208">07</text><text x="410" y="208">08</text><text x="454" y="208">09</text><text x="498" y="208">10</text><text x="542" y="208">11</text></g>
+        <g font-size="13" class="mono ink" text-anchor="middle"><text x="410" y="228">a</text><text x="454" y="228">b</text><text x="498" y="228" class="vio" font-weight="600">c′</text><text x="542" y="228">d</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="38" y="243">i</text><text x="82" y="243">i</text><text x="126" y="243">i</text><text x="170" y="243">i</text><text x="224" y="243">E</text><text x="268" y="243">E</text><text x="312" y="243">E</text><text x="356" y="243">E</text><text x="410" y="243">V</text><text x="454" y="243">V</text><text x="498" y="243">V</text><text x="542" y="243">V</text></g>
+        <rect x="590" y="188" width="160" height="64" rx="6" class="surf"/>
+        <text x="600" y="206" font-size="11" class="mut">map</text>
+        <text x="600" y="232" font-size="13" class="mono acc" font-weight="600">chunk 500 → 8</text>
+        <rect x="10" y="266" width="740" height="58" rx="8" class="stps"/>
+        <text x="24" y="290" font-size="12" class="ink">Client wrote 1 page; the FTL read 3, programmed 4 and erased 1 block: WA = 4 here, 64 with 256 KB blocks.</text>
+        <text x="24" y="310" font-size="12" class="ink">Tiny map, but every small write copies the rest of its block: direct mapping's problem again.</text>
+        </g>
+        <path d="M16 496 H744" class="ln"/>
+        <text x="16" y="514" font-size="12" class="ink" font-weight="600">④ The trade: fewer map entries, more rewrites</text>
+        <text x="16" y="534" font-size="11" class="ink2">What the 1 GiB buys: every page can move on its own. GC (§2) copied single live pages, liveness was</text>
+        <text x="16" y="550" font-size="11" class="ink2">"the map still points here", and trim (§4) dropped single entries. A block map takes that freedom away.</text>
+        <text x="16" y="568" font-size="11" class="ink2">Neither end works alone; §6 (hybrid mapping) and §7 (caching the map) look for the middle.</text>
+        <text x="16" y="594" font-size="10" class="mono mut">MAP</text>
+        <text x="214" y="594" font-size="10" class="mono mut">ENTRIES FOR 1 TB</text>
+        <text x="372" y="594" font-size="10" class="mono mut">MEMORY</text>
+        <text x="464" y="594" font-size="10" class="mono mut">ONE 4 KB REWRITE PROGRAMS</text>
+        <text x="16" y="614" font-size="11.5" class="ink2">one entry per 4 KB page</text>
+        <text x="214" y="614" font-size="11.5" class="ink2">2²⁸ ≈ 268 million</text>
+        <text x="372" y="614" font-size="11.5" class="ink" font-weight="600">1 GiB</text>
+        <text x="464" y="614" font-size="11.5" class="ink" font-weight="600">1 page (GC copies come later, §3)</text>
+        <text x="16" y="634" font-size="11.5" class="ink2">one entry per 256 KB block</text>
+        <text x="214" y="634" font-size="11.5" class="ink2">2²² ≈ 4.2 million</text>
+        <text x="372" y="634" font-size="11.5" class="ink" font-weight="600">16 MiB</text>
+        <text x="464" y="634" font-size="11.5" class="ink" font-weight="600">64 pages</text>
+        <text x="16" y="664" font-size="11" class="ink2">The same trade returns inside flash caches: a log-structured cache keeps one DRAM entry per object;</text>
+        <text x="16" y="680" font-size="11" class="ink2">a set-associative cache keeps almost none, but each 100-byte insert rewrites a whole 4 KB page.</text>
+        <a href="2026-10-08-storage-3-5-flash-caches.html#s3"><rect x="604" y="668" width="64" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="636" y="681" font-size="10.5" class="acc" font-weight="600" text-anchor="middle">3.5 §3</text></a>
+      </svg>
+    </div>
+    <p class="cap">Figure 5. Block-level mapping on OSTEP's example (44.9, redrawn). ① Why the log needs a map, and how big a page map is. ② The fix: one map entry covers four logical blocks, and a read adds the offset to the block's start. ③ The catch: rewriting one of the four forces the whole chunk to a new block. ④ The trade: what the page map's memory buys, entry counts and costs for 1 TB, and the same trade in flash caches (<a href="2026-10-08-storage-3-5-flash-caches.html#s3">page 3.5 §3</a>).</p>
+  </div>
+
+  <p>The second cost of the log is the map itself (Figure 5, ①). Under direct mapping (<a href="2026-10-08-storage-2-flash-and-ftl.html#s6">page ② §6</a>), logical block 2002 always lives in physical page 2002, so its place is computed and no table exists. The log-structured FTL writes each new version to a fresh page, so 2002 sits in page 6 today and in page 10 after its next write, and the SSD can find it only by remembering where it went. A page-level map keeps one entry per page. A 1 TB SSD with 4 KB pages has 2<sup>40</sup> ÷ 2<sup>12</sup> = 2<sup>28</sup> pages, about 268 million, and at 4 bytes per entry the map needs 2<sup>28</sup> × 4 B = 1 GiB of memory inside the device, just for the mapping. OSTEP calls this page-level scheme impractical. <span class="src">OSTEP 44.9</span></p>
+  <p>Real drives mostly pay it anyway. The ZNS paper reports that the table "often requires 1GB of mappings per 1TB of media capacity", kept in the device's DRAM in consumer and enterprise SSDs, while small embedded SSDs cache it (§7's idea) at some cost in speed. The memory is not free: the same paper names overprovisioning and DRAM as the most expensive components of an SSD. Still, 1 GiB per TB is about 0.1% of the data, since a 4-byte entry covers 4,096 bytes. <a href="2026-10-08-storage-3-5-flash-caches.html#s7">Page 3.5 §7</a> shows where the bill really bites: when the unit shrinks from a 4 KB page to a 100-byte object. <span class="src">Bjørling et al., ZNS, USENIX ATC 2021, §2.1 and §3.1</span></p>
+  <p>The obvious fix keeps one entry per block instead of one per page (Figure 5, ②), which shrinks the map by the ratio of block size to page size: 64 for 256 KB blocks of 4 KB pages, so 16 MiB instead of 1 GiB. It works like a larger page size in virtual memory. The logical address splits into a <b>chunk number</b>, which goes through the map, and an <b>offset</b>, which is used as it is. <span class="src">OSTEP 44.9</span></p>
+  <p>Figure 5 runs OSTEP's example with four pages per block. Logical blocks 2000–2003, holding a, b, c and d, sit in physical block 1, pages 4–7. With four pages per chunk the offset is the low 2 bits of the address, so all four share chunk number 2000 ÷ 4 = 500, and the map needs a single entry, 500 → 4. A read of 2002 takes chunk 500 and offset 2, looks up 4, adds 2, and reads page 6, which holds c. <span class="src">OSTEP 44.9</span></p>
+  <p>Writes break it (Figure 5, ③). When the client rewrites 2002 with c′, the chunk can move only as a whole, because one entry describes all four pages. The FTL reads a, b and d, programs all four into a fresh block (pages 8–11), points chunk 500 at 8, and erases block 1. One client page cost four programs; with 256 KB blocks, each 4 KB rewrite would copy the other 63 pages. That is direct mapping's small-write problem back again, and since real writes are often smaller than a block, OSTEP rejects pure block mapping. <span class="src">OSTEP 44.9</span></p>
+  <p>Figure 5, ④ sets the two ends side by side: fewer map entries cost more rewrites. What the page map's memory buys is freedom: every page can move on its own. §2's collector copied single live pages, liveness was "the map still points here", and trim dropped single entries; a block map takes all three away. §6 and §7 look for a point between the two ends. The same trade returns one layer up, inside the flash caches of <a href="2026-10-08-storage-3-5-flash-caches.html#s3">page 3.5 §2–§3</a>, where a per-object index plays the page map and a hashed 4 KB set plays the block.</p>
+  <p>A block map does work for one kind of writer: one that never rewrites part of a block. If every block is written whole, in order, and dropped whole, ③ never happens. Zoned SSDs make exactly this the host's rule, and in return the drive can map whole erase blocks and shrink or drop its DRAM (§10.2). <span class="src">ZNS, ATC 2021, §3.1 "Mapping Table"</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A page map costs 1 GiB per TB (one 4-byte entry per 4 KB page). A block map is 64× smaller, but a small write must copy the rest of its block. Neither works alone: fewer map entries, more rewrites, the same trade a flash cache faces (<a href="2026-10-08-storage-3-5-flash-caches.html#s3">page 3.5 §3</a>).</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="n">§6</span><h2>Hybrid mapping: how do log blocks and their three merges work?</h2><span class="tag t-what">main · read</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>Only the shape returns: a small per-page log in front of a large per-block area is Kangaroo's layout (<a href="2026-10-08-storage-3-5-flash-caches.html#s5">page 3.5 §5</a>). The three merges can be skipped.</p>
+
+  <div class="figure" id="fig-merge">
+    <div class="scroll">
+      <svg viewBox="0 0 760 436" width="760" role="img" aria-label="Three merges of a hybrid FTL: a switch merge copies nothing, a partial merge copies the missing pages, a full merge gathers pages for every chunk in the log block">
+        <defs><marker id="h3m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+                <text x="16" y="20" font-size="12" class="ink" font-weight="600">① Switch merge · the client rewrote the whole chunk, in order</text>
+        <g font-size="10" class="mono mut"><text x="16" y="42">log block 0</text><text x="176" y="42">data block 2 · chunk 250</text><text x="380" y="42">block 0, after</text></g>
+        <g class="accs"><rect x="16" y="50" width="36" height="40"/><rect x="52" y="50" width="36" height="40"/><rect x="88" y="50" width="36" height="40"/><rect x="124" y="50" width="36" height="40"/></g>
+        <g class="stps"><rect x="176" y="50" width="36" height="40"/><rect x="212" y="50" width="36" height="40"/><rect x="248" y="50" width="36" height="40"/><rect x="284" y="50" width="36" height="40"/></g>
+        <g class="accs"><rect x="380" y="50" width="36" height="40"/><rect x="416" y="50" width="36" height="40"/><rect x="452" y="50" width="36" height="40"/><rect x="488" y="50" width="36" height="40"/></g>
+        <g font-size="12" class="mono ink" text-anchor="middle"><text x="34" y="75">a′</text><text x="70" y="75">b′</text><text x="106" y="75">c′</text><text x="142" y="75">d′</text><text x="398" y="75">a′</text><text x="434" y="75">b′</text><text x="470" y="75">c′</text><text x="506" y="75">d′</text></g>
+        <g font-size="12" class="mono stp" text-anchor="middle" text-decoration="line-through"><text x="194" y="75">a</text><text x="230" y="75">b</text><text x="266" y="75">c</text><text x="302" y="75">d</text></g>
+        <path d="M330 70 L370 70" class="arr" marker-end="url(#h3m)"/>
+        <text x="540" y="62" font-size="11" class="mono acc" font-weight="600">data table: 250 → block 0</text>
+        <text x="540" y="80" font-size="11" class="ink2">block 2 erased → a new log block</text>
+        <text x="540" y="99" font-size="12" class="vio" font-weight="600">copies: 0</text>
+        <text x="16" y="112" font-size="10" class="mono mut">log table before: 1000→0 · 1001→1 · 1002→2 · 1003→3 · after: empty</text>
+        <path d="M10 128 H750" class="ln"/>
+
+                <text x="16" y="156" font-size="12" class="ink" font-weight="600">② Partial merge · the client rewrote only 1000 and 1001</text>
+        <g font-size="10" class="mono mut"><text x="16" y="178">log block 0</text><text x="176" y="178">data block 2 · chunk 250</text><text x="380" y="178">block 0, after</text></g>
+        <g><rect x="16" y="186" width="36" height="40" class="accs"/><rect x="52" y="186" width="36" height="40" class="accs"/><rect x="88" y="186" width="36" height="40" class="surf"/><rect x="124" y="186" width="36" height="40" class="surf"/></g>
+        <g><rect x="176" y="186" width="36" height="40" class="stps"/><rect x="212" y="186" width="36" height="40" class="stps"/><rect x="248" y="186" width="36" height="40" class="ambs"/><rect x="284" y="186" width="36" height="40" class="ambs"/></g>
+        <g><rect x="380" y="186" width="36" height="40" class="accs"/><rect x="416" y="186" width="36" height="40" class="accs"/><rect x="452" y="186" width="36" height="40" class="vios"/><rect x="488" y="186" width="36" height="40" class="vios"/></g>
+        <g font-size="12" class="mono ink" text-anchor="middle"><text x="34" y="211">a′</text><text x="70" y="211">b′</text><text x="266" y="211">c</text><text x="302" y="211">d</text><text x="398" y="211">a′</text><text x="434" y="211">b′</text></g>
+        <g font-size="10" class="mono ink2" text-anchor="middle"><text x="106" y="211">E</text><text x="142" y="211">E</text></g>
+        <g font-size="12" class="mono stp" text-anchor="middle" text-decoration="line-through"><text x="194" y="211">a</text><text x="230" y="211">b</text></g>
+        <g font-size="12" class="mono vio" text-anchor="middle" font-weight="600"><text x="470" y="211">c</text><text x="506" y="211">d</text></g>
+        <path d="M330 206 L370 206" class="arr" marker-end="url(#h3m)"/>
+        <text x="540" y="198" font-size="11" class="mono acc" font-weight="600">data table: 250 → block 0</text>
+        <text x="540" y="216" font-size="11" class="ink2">copy c, d from block 2; erase block 2</text>
+        <text x="540" y="235" font-size="12" class="vio" font-weight="600">copies: 2</text>
+        <text x="16" y="248" font-size="10" class="mono mut">log table before: 1000→0 · 1001→1</text>
+        <path d="M10 264 H750" class="ln"/>
+
+                <text x="16" y="292" font-size="12" class="ink" font-weight="600">③ Full merge · the log block holds one page from each of four chunks</text>
+        <g font-size="10" class="mono mut"><text x="16" y="314">log block A</text><text x="200" y="314">four fresh data blocks, one per chunk</text></g>
+        <g class="accs"><rect x="16" y="322" width="36" height="40"/><rect x="52" y="322" width="36" height="40"/><rect x="88" y="322" width="36" height="40"/><rect x="124" y="322" width="36" height="40"/></g>
+        <g font-size="12" class="mono ink" text-anchor="middle"><text x="34" y="347">0</text><text x="70" y="347">4</text><text x="106" y="347">8</text><text x="142" y="347">12</text></g>
+        <path d="M164 342 L192 342" class="arr" marker-end="url(#h3m)"/>
+        <g>
+          <rect x="200" y="322" width="36" height="40" class="accs"/><rect x="236" y="322" width="36" height="40" class="vios"/><rect x="272" y="322" width="36" height="40" class="vios"/><rect x="308" y="322" width="36" height="40" class="vios"/>
+          <rect x="360" y="322" width="36" height="40" class="accs"/><rect x="396" y="322" width="36" height="40" class="vios"/><rect x="432" y="322" width="36" height="40" class="vios"/><rect x="468" y="322" width="36" height="40" class="vios"/>
+          <rect x="200" y="372" width="36" height="40" class="accs"/><rect x="236" y="372" width="36" height="40" class="vios"/><rect x="272" y="372" width="36" height="40" class="vios"/><rect x="308" y="372" width="36" height="40" class="vios"/>
+          <rect x="360" y="372" width="36" height="40" class="accs"/><rect x="396" y="372" width="36" height="40" class="vios"/><rect x="432" y="372" width="36" height="40" class="vios"/><rect x="468" y="372" width="36" height="40" class="vios"/>
+        </g>
+        <g font-size="12" class="mono ink" text-anchor="middle">
+          <text x="218" y="347">0</text><text x="254" y="347">1</text><text x="290" y="347">2</text><text x="326" y="347">3</text>
+          <text x="378" y="347">4</text><text x="414" y="347">5</text><text x="450" y="347">6</text><text x="486" y="347">7</text>
+          <text x="218" y="397">8</text><text x="254" y="397">9</text><text x="290" y="397">10</text><text x="326" y="397">11</text>
+          <text x="378" y="397">12</text><text x="414" y="397">13</text><text x="450" y="397">14</text><text x="486" y="397">15</text>
+        </g>
+        <text x="540" y="336" font-size="11" class="ink2">12 pages gathered from their old</text>
+        <text x="540" y="354" font-size="11" class="ink2">blocks + 4 from A = 16 programs,</text>
+        <text x="540" y="372" font-size="11" class="ink2">then erase A and the old blocks</text>
+        <text x="540" y="394" font-size="12" class="vio" font-weight="600">copies: 12 (+4 rewritten)</text>
+        <text x="16" y="428" font-size="11" class="ink2">teal = written into a log block by the client · amber = live in a data block · red, struck = dead · violet = copied by the merge</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 6. The three merges of a hybrid FTL (OSTEP 44.9, after Kim et al. 2002), on OSTEP's example: logical pages 1000–1003 (a, b, c, d) form chunk 250, kept in data block 2. A merge turns a per-page-mapped log block back into a block that needs one pointer. Its cost is the violet pages.</p>
+  </div>
+
+  <p><b>Hybrid mapping</b> keeps both kinds of entry. A few erased blocks, called <b>log blocks</b>, receive all incoming writes, and they are mapped per page in a small <b>log table</b>, so any page can go anywhere in them without copying. Everything else is mapped per block in a large <b>data table</b>. A read looks in the log table first and falls back to the data table. <span class="src">OSTEP 44.9</span></p>
+  <p>The scheme saves memory only while the log blocks stay few, so the FTL must keep turning log blocks back into ordinary data blocks, which need one pointer each. This conversion is a <b>merge</b>, and its cost depends on what the log block holds. OSTEP describes three cases, after Kim et al. (2002), using logical pages 1000–1003 (a, b, c, d), whose chunk 250 sits in data block 2 (Figure 6). <span class="src">OSTEP 44.9</span></p>
+  <p><b>① Switch merge.</b> The client rewrote all four pages, in order, into log block 0 (a′, b′, c′, d′). Log block 0 already holds the whole chunk in the right order, so the FTL points chunk 250 at block 0 in the data table and drops the four log-table entries. Old block 2 is entirely dead; it is erased and becomes a log block. Nothing is copied, which makes this the best case. <span class="src">OSTEP 44.9</span></p>
+  <p><b>② Partial merge.</b> The client rewrote only 1000 and 1001 (a′ and b′ in log block 0). To make block 0 hold the whole chunk, the FTL copies c and d from block 2 into block 0's free pages, then points chunk 250 at block 0 and erases block 2. Two pages were copied that the client never wrote, so write amplification rises. <span class="src">OSTEP 44.9</span></p>
+  <p><b>③ Full merge.</b> The log block holds one page from each of four different chunks: logical pages 0, 4, 8 and 12. No chunk is complete, so for each one the FTL gathers the other three pages from wherever they live and writes all four into a fresh block: 0–3, 4–7, 8–11 and 12–15. Retiring one 4-page log block costs 16 programs, 12 of them copies. OSTEP warns that frequent full merges seriously harm performance and should be avoided whenever possible. <span class="src">OSTEP 44.9</span></p>
+  <p>The pattern matches garbage collection. A merge is cheap when the pages that arrived together belong together, a whole chunk in order, and expensive when a log block mixes pages from many places.</p>
+  <p>The shape returns in Kangaroo (<a href="2026-10-08-storage-3-5-flash-caches.html#s5">page 3.5 §5</a>): a small log with an entry per object, in front of a large store found by hashing. Moving objects out of that log costs like a partial merge, since a whole 4 KB set is rewritten for the few objects that arrived for it.</p>
+  <p class="gist"><span class="lbl">CARRY</span>Hybrid: log blocks are mapped per page, data blocks per block, and log blocks are merged back. Switch merge = 0 copies (whole chunk, in order). Partial = copy the missing pages. Full = rebuild every chunk the log block touches: the expensive case.</p>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="n">§7</span><h2>Can the page map simply be cached?</h2><span class="tag t-ctl">skim · table + carry</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>One idea returns: Nemo keeps its index on flash and caches only the hot part in DRAM (<a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8.2</a>), as LFS does with its imap (<a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.3</a>).</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>SCHEME</th><th>WHAT THE MAP HOLDS</th><th>MEMORY FOR 1 TB</th><th>THE PRICE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Page-level map</b></td><td>One entry per page.</td><td class="c">1 GiB</td><td>None in flash traffic; the memory itself.</td></tr>
+        <tr><td><b>Block-level map</b> (§5)</td><td>One entry per block; the offset comes from the address.</td><td class="c">16 MiB</td><td>A small write copies the rest of its block.</td></tr>
+        <tr><td><b>Hybrid map</b> (§6)</td><td>Log blocks per page, data blocks per block.</td><td class="c">between</td><td>Merges: free, partial copies, or expensive full merges.</td></tr>
+        <tr class="win-a"><td><b>Page map + caching</b></td><td>Full page map on flash; only the active entries in memory.</td><td class="c">the working set</td><td>A miss costs an extra flash read; evicting a changed entry costs an extra write.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A simpler idea keeps the full page map on flash and caches only the active part of it in device memory; OSTEP cites Gupta et al.'s DFTL. If the workload touches a small set of pages, their entries stay cached and performance stays high without a large memory. If memory cannot hold the working set of entries, each access may first need an extra flash read to fetch the missing entry, and making room may evict an entry that has changed but not yet been saved (a dirty entry), which costs an extra write. Workloads usually show locality, so caching tends to work. <span class="src">OSTEP 44.9</span></p>
+  <p>Nemo uses the same idea one layer up. The Bloom filters that tell it which group of sets may hold a key are kept on flash, and only the frequently used ones are cached in DRAM. <span class="src">Yang et al., Nemo, ASPLOS 2026, §4.1</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Every map scheme trades device memory against flash traffic. Caching the page map works when accesses have locality; otherwise each miss costs an extra flash read, and evicting a dirty entry an extra write.</p>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="n">§8</span><h2>Why does wear leveling have to move data nobody changed?</h2><span class="tag t-ctl">skim · figure + carry</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>The papers' designs do not turn on wear leveling; they treat wear as one total write budget (§3, link 4a).</p>
+
+  <div class="figure" id="fig-wear">
+    <div class="scroll">
+      <svg viewBox="0 0 760 244" width="760" role="img" aria-label="Erase counts of eight blocks: six are near 800, two cold blocks are near 60">
+        <text x="16" y="18" font-size="12" class="mut">erase counts per block (illustrative)</text>
+        <path d="M40 170 H720" class="ln"/>
+        <g>
+          <rect x="60" y="51.4" width="56" height="118.6" class="accs"/><rect x="140" y="55.8" width="56" height="114.2" class="accs"/><rect x="220" y="53.6" width="56" height="116.4" class="accs"/><rect x="300" y="161.3" width="56" height="8.7" class="ambs"/>
+          <rect x="380" y="52.9" width="56" height="117.1" class="accs"/><rect x="460" y="50" width="56" height="120" class="accs"/><rect x="540" y="55.1" width="56" height="114.9" class="accs"/><rect x="620" y="159.9" width="56" height="10.1" class="ambs"/>
+        </g>
+        <g font-size="10" class="mono ink2" text-anchor="middle">
+          <text x="88" y="46">820</text><text x="168" y="51">790</text><text x="248" y="49">805</text><text x="328" y="156">60</text>
+          <text x="408" y="48">810</text><text x="488" y="45">830</text><text x="568" y="50">795</text><text x="648" y="155">70</text>
+        </g>
+        <g font-size="10" class="mono mut" text-anchor="middle">
+          <text x="88" y="186">blk 0</text><text x="168" y="186">blk 1</text><text x="248" y="186">blk 2</text><text x="328" y="186">blk 3</text>
+          <text x="408" y="186">blk 4</text><text x="488" y="186">blk 5</text><text x="568" y="186">blk 6</text><text x="648" y="186">blk 7</text>
+        </g>
+        <text x="328" y="136" font-size="12" class="amb" font-weight="600" text-anchor="middle">cold</text>
+        <text x="648" y="136" font-size="12" class="amb" font-weight="600" text-anchor="middle">cold</text>
+        <text x="16" y="212" font-size="12" class="ink">Blocks 3 and 7 hold data that is never rewritten: u ≈ 1, so greedy GC never picks them and they stay unworn.</text>
+        <text x="16" y="232" font-size="12" class="ink">Wear leveling copies their data elsewhere and returns them to the pool: extra writes, so WA rises.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 7. Why cold blocks need help. Blocks that take new writes are erased again and again; blocks full of unchanging data are never collected, so their erase counts stay low. The counts are illustrative.</p>
+  </div>
+
+  <p>Logging spreads writes over the chip, and garbage collection helps, since each reclaimed block is erased and reused. But a block full of long-lived data that never gets overwritten keeps u near 1, so a greedy collector never picks it, and its erase count stays low while the other blocks wear down (Figure 7). <b>Wear leveling</b> fixes this: the FTL periodically reads all the live data out of such a block, writes it elsewhere, and returns the block to the pool that takes new writes, so that all blocks wear out at about the same time. Those moves are writes the client never asked for, so wear leveling raises write amplification and lowers performance. <span class="src">OSTEP 44.10</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Cold blocks escape GC, so their erase counts stay low. Wear leveling moves their data on purpose and pays extra writes for even wear.</p>
+</section>
+
+<section id="s9">
+  <div class="sec-head"><span class="n">§9</span><h2>How do SSDs and hard disks compare in speed and price?</h2><span class="tag t-what">main · read</span><span class="tag t-skip">papers: skip</span></div>
+  <p class="pp skip"><span class="k">FOR THE PAPERS · SKIP</span>The price comparison the papers need is a different pair, flash against DRAM (<a href="2026-10-08-storage-3-5-flash-caches.html#s6">page 3.5 §6</a>). KVell §2 revisits the random-against-sequential gap on 2016–2018 NVMe drives (§10.1).</p>
+
+  <div class="figure" id="fig-perf">
+    <div class="scroll">
+      <svg viewBox="0 0 760 320" width="760" role="img" aria-label="Bar chart of random read, random write, sequential read and sequential write bandwidth for three SSDs and one hard disk">
+        <text x="16" y="30" font-size="11" class="mut">MB/s</text>
+        <g class="ln"><path d="M60 40 V240"/><path d="M60 240 H740"/><path d="M60 195.6 H740" stroke-dasharray="3 4"/><path d="M60 151.1 H740" stroke-dasharray="3 4"/><path d="M60 106.7 H740" stroke-dasharray="3 4"/><path d="M60 62.2 H740" stroke-dasharray="3 4"/></g>
+        <g font-size="10" class="mono mut" text-anchor="end"><text x="54" y="244">0</text><text x="54" y="199.6">100</text><text x="54" y="155">200</text><text x="54" y="110.7">300</text><text x="54" y="66.2">400</text></g>
+                <rect x="80" y="194.2" width="30" height="45.8" class="accs"/><rect x="116" y="202.7" width="30" height="37.3" class="accs"/><rect x="152" y="222.7" width="30" height="17.3" class="accs"/><rect x="188" y="238" width="30" height="2" class="ambs"/>
+                <rect x="250" y="112.4" width="30" height="127.6" class="accs"/><rect x="286" y="128" width="30" height="112" class="accs"/><rect x="322" y="141.3" width="30" height="98.7" class="accs"/><rect x="358" y="238" width="30" height="2" class="ambs"/>
+                <rect x="420" y="52.9" width="30" height="187.1" class="accs"/><rect x="456" y="51.6" width="30" height="188.4" class="accs"/><rect x="492" y="87.1" width="30" height="152.9" class="accs"/><rect x="528" y="140.9" width="30" height="99.1" class="ambs"/>
+                <rect x="590" y="69.3" width="30" height="170.7" class="accs"/><rect x="626" y="73.8" width="30" height="166.2" class="accs"/><rect x="662" y="82.7" width="30" height="157.3" class="accs"/><rect x="698" y="140.9" width="30" height="99.1" class="ambs"/>
+        <g font-size="9" class="mono ink2" text-anchor="middle">
+          <text x="95" y="190">103</text><text x="131" y="198">84</text><text x="167" y="218">39</text><text x="203" y="234">2</text>
+          <text x="265" y="108">287</text><text x="301" y="124">252</text><text x="337" y="137">222</text><text x="373" y="234">2</text>
+          <text x="435" y="49">421</text><text x="471" y="47">424</text><text x="507" y="83">344</text><text x="543" y="137">223</text>
+          <text x="605" y="65">384</text><text x="641" y="70">374</text><text x="677" y="79">354</text><text x="713" y="137">223</text>
+        </g>
+        <g font-size="12" class="ink" text-anchor="middle"><text x="149" y="258">random read</text><text x="319" y="258">random write</text><text x="489" y="258">sequential read</text><text x="659" y="258">sequential write</text></g>
+        <rect x="60" y="276" width="14" height="12" class="accs"/><text x="80" y="287" font-size="11" class="ink2">three SSDs: Samsung 840 Pro, Seagate 600, Intel 335 (left to right)</text>
+        <rect x="490" y="276" width="14" height="12" class="ambs"/><text x="510" y="287" font-size="11" class="ink2">Seagate Savvio 15K.3 hard disk</text>
+        <text x="60" y="312" font-size="12" class="ink">Price (2015): SSD ≈ 60 cents per GB · hard disk ≈ 5 cents per GB, more than 10× apart</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 8. OSTEP's Figure 44.4 as a bar chart (numbers from AnandTech 2013 and Tom's Hardware 2015), with OSTEP's 2015 prices. The hard disk's random bars are 2 MB/s, rounded up.</p>
+  </div>
+
+  <p>Figure 8 plots OSTEP's measurements of three 2013 SSDs and a high-end 15,000 RPM hard disk. Four facts stand out. <span class="src">OSTEP 44.11, Figure 44.4</span></p>
+  <p><b>Random I/O is where SSDs win overwhelmingly:</b> tens to hundreds of MB/s against about 2 MB/s for the disk, a figure OSTEP had to round up to reach 2. This is page ①'s seek and rotation, gone.</p>
+  <p><b>Sequential I/O differs far less:</b> 344–424 MB/s against 223 MB/s. If sequential bandwidth is all that matters, a hard disk is still a reasonable choice.</p>
+  <p><b>SSD random writes (222–287 MB/s) beat SSD random reads (39–103 MB/s).</b> The log-structured FTL is the reason: it turns the client's random writes into sequential programs into fresh blocks, while a random read has to go wherever the data happens to be. <span class="src">OSTEP 44.11</span></p>
+  <p><b>SSDs still show a gap between random and sequential,</b> about 4 to 9 times for reads. So the file-system techniques built to avoid random I/O on hard disks still pay on SSDs, with a smaller payoff. <span class="src">OSTEP 44.11</span></p>
+  <p><b>Price.</b> In OSTEP's 2015 survey an SSD cost about $150 for 250 GB, which is 60 cents per GB, and a hard disk about $50 for 1 TB, which is 5 cents per GB: more than 10× apart. That gap decides how large systems are built. SSDs go where performance matters, especially random reads; hard disks hold bulk capacity; and hybrid systems keep the popular, "hot" data on a few SSDs and the "cold" rest on hard disks. As long as the price gap lasts, hard disks stay. <span class="src">OSTEP 44.11</span></p>
+
+  <div class="tablewrap" id="axes">
+    <table>
+      <thead><tr><th>AXIS</th><th>HARD DISK</th><th>FLASH SSD</th><th>WHAT CHANGED</th></tr></thead>
+      <tbody>
+        <tr><td><b>A1 · What holds a bit</b></td><td>Magnetized spot on a spinning platter.</td><td>Charge in a transistor cell.</td><td>No moving parts.</td></tr>
+        <tr class="win-a"><td><b>A2 · Operations and units</b></td><td>Read and write a sector; overwrite in place.</td><td>Read and program a page (~4 KB); erase a block (128–256 KB); no overwrite.</td><td>One unit became two. The root of chapter 44.</td></tr>
+        <tr><td><b>A3 · Where the time goes</b></td><td>Positioning: seek + rotation, ms.</td><td>The kind of operation: read tens of µs, program hundreds of µs, erase ms.</td><td>Cost moved from <i>where</i> to <i>what</i>.</td></tr>
+        <tr class="win-a"><td><b>A4 · Address → place</b></td><td>Fixed at manufacture.</td><td>Moved by the FTL on every write.</td><td>Address stopped meaning place; garbage, GC and the map follow.</td></tr>
+        <tr><td><b>A5 · Access pattern</b></td><td>Random 2 MB/s, sequential 223 MB/s (Savvio 15K.3).</td><td>Random read 39–103, random write 222–287, sequential 344–424 MB/s.</td><td>The random–sequential gap shrank from about 110× to 4–9× for reads; random writes beat random reads.</td></tr>
+        <tr><td><b>A6 · Wear and failure</b></td><td>Mechanical faults such as a head crash; rewrites do not wear.</td><td>Wear-out after ~10,000 P/E cycles (MLC); disturbance.</td><td>Writing now spends lifetime, and WA multiplies the spending.</td></tr>
+        <tr><td><b>A7 · Price per GB</b></td><td>About 5 cents (2015).</td><td>About 60 cents (2015).</td><td>More than 10× apart: hot data on SSDs, cold data on disks.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src" style="white-space:normal">OSTEP 44.11 and Figure 44.4 (A5, A7); 44.3–44.4 (A2, A3, A6); 37.4 (hard-disk column)</p>
+  <p class="gist"><span class="lbl">CARRY</span>Against a hard disk, an SSD does random reads 20–50× faster and random writes 110–140× faster, but sequential only about 2× faster. Its random writes beat its random reads because of the log. It costs over 10× more per GB (2015), so hot data goes on flash and cold data on disk.</p>
+</section>
+
+<section id="s10">
+  <div class="sec-head"><span class="n">§10</span><h2>What does this page hand to the papers?</h2><span class="tag t-what">main · read</span><span class="tag t-pp">papers: needed</span></div>
+  <p class="pp"><span class="k">FOR THE PAPERS · NEEDED</span>One idea: §3's DLWA = 1/(1−u) is set by how the layer above writes, and the papers' caches are that layer. The cache itself, and the DRAM it spends, are <a href="2026-10-08-storage-3-5-flash-caches.html">page 3.5</a>, read next.</p>
+  <div class="figure" id="fig-writer">
+    <div class="scroll">
+      <svg viewBox="0 0 760 466" width="760" role="img" aria-label="Two panels of four blocks with four pages each. Left: the pages of four groups A to D are interleaved, so every block holds one page of each group; when the A pages die every block is three quarters live and write amplification is 4. Right: the same pages written group by group, so block 0 holds only A pages; it dies whole and write amplification is 1. Below: Kangaroo is the left case, CacheLib's FIFO log and Nemo the right case, and the SSD multiplies whatever the cache sends">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">The writer above sets u: the same 16 pages, written two ways, then every A page dies</text>
+        <text x="16" y="38" font-size="10.5" class="mut">Pages that will die together share a letter. When the A pages die, GC must free a block, and §3’s formula prices it.</text>
+        <rect x="16" y="50" width="356" height="212" rx="6" class="surf"/>
+        <circle cx="32" cy="68" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="32" y="72" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="46" y="72" font-size="11.5" class="ink" font-weight="600">mixed: the groups’ writes arrive interleaved</text>
+        <text x="46" y="88" font-size="10.5" class="mut">the log places them in arrival order</text>
+        <text x="28" y="116" font-size="10" class="mono mut">blk 0</text>
+        <rect x="72" y="100" width="42" height="24" class="stps"/>
+        <text x="93" y="116" font-size="10.5" class="stp" text-anchor="middle">A1</text>
+        <path d="M77 112 H109" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="118" y="100" width="42" height="24" class="ambs"/>
+        <text x="139" y="116" font-size="10.5" class="ink" text-anchor="middle">B1</text>
+        <rect x="164" y="100" width="42" height="24" class="ambs"/>
+        <text x="185" y="116" font-size="10.5" class="ink" text-anchor="middle">C1</text>
+        <rect x="210" y="100" width="42" height="24" class="ambs"/>
+        <text x="231" y="116" font-size="10.5" class="ink" text-anchor="middle">D1</text>
+        <text x="264" y="116" font-size="11" class="stp">u = 3/4</text>
+        <text x="28" y="146" font-size="10" class="mono mut">blk 1</text>
+        <rect x="72" y="130" width="42" height="24" class="stps"/>
+        <text x="93" y="146" font-size="10.5" class="stp" text-anchor="middle">A2</text>
+        <path d="M77 142 H109" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="118" y="130" width="42" height="24" class="ambs"/>
+        <text x="139" y="146" font-size="10.5" class="ink" text-anchor="middle">B2</text>
+        <rect x="164" y="130" width="42" height="24" class="ambs"/>
+        <text x="185" y="146" font-size="10.5" class="ink" text-anchor="middle">C2</text>
+        <rect x="210" y="130" width="42" height="24" class="ambs"/>
+        <text x="231" y="146" font-size="10.5" class="ink" text-anchor="middle">D2</text>
+        <text x="264" y="146" font-size="11" class="stp">u = 3/4</text>
+        <text x="28" y="176" font-size="10" class="mono mut">blk 2</text>
+        <rect x="72" y="160" width="42" height="24" class="stps"/>
+        <text x="93" y="176" font-size="10.5" class="stp" text-anchor="middle">A3</text>
+        <path d="M77 172 H109" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="118" y="160" width="42" height="24" class="ambs"/>
+        <text x="139" y="176" font-size="10.5" class="ink" text-anchor="middle">B3</text>
+        <rect x="164" y="160" width="42" height="24" class="ambs"/>
+        <text x="185" y="176" font-size="10.5" class="ink" text-anchor="middle">C3</text>
+        <rect x="210" y="160" width="42" height="24" class="ambs"/>
+        <text x="231" y="176" font-size="10.5" class="ink" text-anchor="middle">D3</text>
+        <text x="264" y="176" font-size="11" class="stp">u = 3/4</text>
+        <text x="28" y="206" font-size="10" class="mono mut">blk 3</text>
+        <rect x="72" y="190" width="42" height="24" class="stps"/>
+        <text x="93" y="206" font-size="10.5" class="stp" text-anchor="middle">A4</text>
+        <path d="M77 202 H109" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="118" y="190" width="42" height="24" class="ambs"/>
+        <text x="139" y="206" font-size="10.5" class="ink" text-anchor="middle">B4</text>
+        <rect x="164" y="190" width="42" height="24" class="ambs"/>
+        <text x="185" y="206" font-size="10.5" class="ink" text-anchor="middle">C4</text>
+        <rect x="210" y="190" width="42" height="24" class="ambs"/>
+        <text x="231" y="206" font-size="10.5" class="ink" text-anchor="middle">D4</text>
+        <text x="264" y="206" font-size="11" class="stp">u = 3/4</text>
+        <text x="30" y="236" font-size="11" class="stp" font-weight="600">every victim 3/4 live: copy 3 pages to free 1</text>
+        <text x="30" y="254" font-size="12" class="stp" font-weight="600">WA = 1/(1 − 3/4) = 4</text>
+        <rect x="388" y="50" width="356" height="212" rx="6" class="surf"/>
+        <circle cx="404" cy="68" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="404" y="72" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="418" y="72" font-size="11.5" class="ink" font-weight="600">grouped: data that dies together, together</text>
+        <text x="418" y="88" font-size="10.5" class="mut">the same pages, written group by group</text>
+        <text x="400" y="116" font-size="10" class="mono mut">blk 0</text>
+        <rect x="444" y="100" width="42" height="24" class="stps"/>
+        <text x="465" y="116" font-size="10.5" class="stp" text-anchor="middle">A1</text>
+        <path d="M449 112 H481" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="490" y="100" width="42" height="24" class="stps"/>
+        <text x="511" y="116" font-size="10.5" class="stp" text-anchor="middle">A2</text>
+        <path d="M495 112 H527" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="536" y="100" width="42" height="24" class="stps"/>
+        <text x="557" y="116" font-size="10.5" class="stp" text-anchor="middle">A3</text>
+        <path d="M541 112 H573" style="stroke:var(--stop);stroke-width:1.4"/>
+        <rect x="582" y="100" width="42" height="24" class="stps"/>
+        <text x="603" y="116" font-size="10.5" class="stp" text-anchor="middle">A4</text>
+        <path d="M587 112 H619" style="stroke:var(--stop);stroke-width:1.4"/>
+        <text x="636" y="116" font-size="11" class="acc">u = 0</text>
+        <text x="400" y="146" font-size="10" class="mono mut">blk 1</text>
+        <rect x="444" y="130" width="42" height="24" class="ambs"/>
+        <text x="465" y="146" font-size="10.5" class="ink" text-anchor="middle">B1</text>
+        <rect x="490" y="130" width="42" height="24" class="ambs"/>
+        <text x="511" y="146" font-size="10.5" class="ink" text-anchor="middle">B2</text>
+        <rect x="536" y="130" width="42" height="24" class="ambs"/>
+        <text x="557" y="146" font-size="10.5" class="ink" text-anchor="middle">B3</text>
+        <rect x="582" y="130" width="42" height="24" class="ambs"/>
+        <text x="603" y="146" font-size="10.5" class="ink" text-anchor="middle">B4</text>
+        <text x="636" y="146" font-size="11" class="mut">u = 1</text>
+        <text x="400" y="176" font-size="10" class="mono mut">blk 2</text>
+        <rect x="444" y="160" width="42" height="24" class="ambs"/>
+        <text x="465" y="176" font-size="10.5" class="ink" text-anchor="middle">C1</text>
+        <rect x="490" y="160" width="42" height="24" class="ambs"/>
+        <text x="511" y="176" font-size="10.5" class="ink" text-anchor="middle">C2</text>
+        <rect x="536" y="160" width="42" height="24" class="ambs"/>
+        <text x="557" y="176" font-size="10.5" class="ink" text-anchor="middle">C3</text>
+        <rect x="582" y="160" width="42" height="24" class="ambs"/>
+        <text x="603" y="176" font-size="10.5" class="ink" text-anchor="middle">C4</text>
+        <text x="636" y="176" font-size="11" class="mut">u = 1</text>
+        <text x="400" y="206" font-size="10" class="mono mut">blk 3</text>
+        <rect x="444" y="190" width="42" height="24" class="ambs"/>
+        <text x="465" y="206" font-size="10.5" class="ink" text-anchor="middle">D1</text>
+        <rect x="490" y="190" width="42" height="24" class="ambs"/>
+        <text x="511" y="206" font-size="10.5" class="ink" text-anchor="middle">D2</text>
+        <rect x="536" y="190" width="42" height="24" class="ambs"/>
+        <text x="557" y="206" font-size="10.5" class="ink" text-anchor="middle">D3</text>
+        <rect x="582" y="190" width="42" height="24" class="ambs"/>
+        <text x="603" y="206" font-size="10.5" class="ink" text-anchor="middle">D4</text>
+        <text x="636" y="206" font-size="11" class="mut">u = 1</text>
+        <text x="402" y="236" font-size="11" class="acc" font-weight="600">victim blk 0, u = 0: erase it, nothing to copy</text>
+        <text x="402" y="254" font-size="12" class="acc" font-weight="600">WA = 1/(1 − 0) = 1</text>
+        <circle cx="24" cy="279" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="283" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="38" y="283" font-size="11.5" class="ink" font-weight="600">The papers’ caches are that writer</text>
+        <rect x="16" y="292" width="356" height="100" rx="6" class="stps"/>
+        <text x="30" y="312" font-size="11.5" class="stp" font-weight="600">Kangaroo’s sets are panel ①</text>
+        <text x="30" y="330" font-size="10.5" class="ink">KSet rewrites random 4 KB sets, “the worst case</text>
+        <text x="30" y="346" font-size="10.5" class="ink">for DLWA” (FairyWREN §3.3). Nemo measured its</text>
+        <text x="30" y="362" font-size="10.5" class="ink">erase units 50–80% live when erased: 2–5× per</text>
+        <text x="30" y="378" font-size="10.5" class="ink">erase, §3’s 1/(1−u) (Nemo §5.2).</text>
+        <rect x="388" y="292" width="356" height="100" rx="6" class="accs"/>
+        <text x="402" y="312" font-size="11.5" class="acc" font-weight="600">CacheLib’s log and Nemo are panel ②</text>
+        <text x="402" y="330" font-size="10.5" class="ink">CacheLib’s large-object cache writes and erases</text>
+        <text x="402" y="346" font-size="10.5" class="ink">regions in FIFO order: DLWA fell from 1.5× to</text>
+        <text x="402" y="362" font-size="10.5" class="ink">1.05× (CacheLib §5.2). Nemo writes and evicts</text>
+        <text x="402" y="378" font-size="10.5" class="ink">whole set-groups: DLWA as low as 1 (Nemo §1).</text>
+        <rect x="16" y="404" width="728" height="50" rx="6" class="surf"/>
+        <circle cx="32" cy="422" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="32" y="426" font-size="10" class="vio" font-weight="600" text-anchor="middle">4</text>
+        <text x="46" y="426" font-size="11.5" class="ink" font-weight="600">So the cache sets the SSD’s DLWA, which multiplies the cache’s own rewrites (ALWA).</text>
+        <text x="46" y="444" font-size="10.5" class="ink2">Both spend one erase budget, quoted per day as DWPD.</text>
+        <a href="2026-10-08-storage-3-5-flash-caches.html#s8"><rect x="560" y="431" width="88" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="604" y="444" font-size="10" class="acc" font-weight="600" text-anchor="middle">page 3.5 §8</text></a>
+        <a href="#s3"><rect x="656" y="431" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="673" y="444" font-size="10" class="acc" font-weight="600" text-anchor="middle">§3</text></a>
+      </svg>
+    </div>
+    <p class="cap">Figure 9. The writer above sets u. Sixteen pages from four groups, A to D, where each group dies together. ① The groups' writes arrive interleaved and the log places them in arrival order, so every block holds one page of each group; when the A pages die, every block is still 3/4 live, and freeing one page costs three copies. ② The same pages written group by group: block 0 holds only A, dies whole, and is erased with nothing to copy. ③ The papers' caches are this writer. ④ The SSD multiplies whatever the cache sends. The toy blocks are made up; the paper numbers are quoted.</p>
+  </div>
+  <h3>10.1 · The writer above sets u (Figure 9)</h3>
+  <p>§3 priced garbage collection at 1/(1−u), where u is the live share of the victim block, and §4 showed that u is not fixed: if data written together also dies together, whole blocks empty out at once. Figure 9 runs that on sixteen pages from four groups, A to D, where each group dies together. In ①, the groups' writes arrive interleaved and the log places them in arrival order, so every block holds one page of each group. When the A pages die, every block is still 3/4 live, and freeing one page costs three copies: WA = 1/(1 − 3/4) = 4. In ②, the same pages are written group by group, so block 0 holds only A. It dies whole and is erased with nothing to copy: WA = 1. The data and the drive are the same; only the order of the writes differs.</p>
+  <p>The papers' caches are this writer (③). Kangaroo's set area rewrites random 4 KB sets, which FairyWREN calls "the worst case for DLWA", and Nemo measured the effect on a zoned drive: when Kangaroo's erase units were erased, 50–80% of their sets were still valid, so each erase cost 2–5×, which is 1/(1−u) for u from 0.5 to 0.8. CacheLib's cache for large objects is panel ②: it writes and erases its regions in FIFO order, and that alone cut its DLWA from 1.5× to 1.05×. Nemo writes and evicts whole set-groups, for a DLWA as low as 1. <span class="src">FairyWREN §3.3 · Nemo §1 and §5.2 · CacheLib §4.2 and §5.2, "Flash endurance"</span></p>
+  <p>The SSD then multiplies whatever the cache sends (④): its DLWA times the cache's own rewrites, ALWA, gives the flash writes, and both spend the one erase budget that the papers quote per day as DWPD (<a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8</a>).</p>
+  <p>This is why "write sequentially" survives on SSDs, for a new reason. On a hard disk, sequential access removed the seek and the rotation, over 99% of a random read (page ① §2). On NVMe it barely buys speed any more: KVell's 2013 SATA SSD wrote randomly at 0.04 GB/s against 0.4 GB/s sequentially, its 2016 NVMe drives at 0.7 against 0.8, so KVell stops forcing sequential writes and spends its effort on the CPU. What is left is wear: panel ①'s copies spend the erase budget. KVell's first figure also shows the 2013 drive holding 50K write IOPS for 40 minutes and then sinking to 11K, which fits link 4b: once the free blocks run out, writes wait for GC. <span class="src">OSTEP 44.11 · KVell §2, Table 1 and Fig. 1</span></p>
+  <p>The rule has a name. OSTEP points to He et al.'s "The Unwritten Contract of Solid State Drives" (EuroSys 2017), the SSD's version of the hard disk's contract on page ① §3, and lists its five rules: request scale, locality, aligned sequentiality, grouping by death time, and uniform lifetime. Grouping by death time is panel ②: put data that will die together into the same blocks. FairyWREN's hot and cold erase units and Nemo's whole-group eviction apply it from the cache (<a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.6</a>). <span class="src">OSTEP 44.12 and 43.13, references [HK+17]</span></p>
+
+  <h3>10.2 · Zoned SSDs: the writer takes the whole job</h3>
+  <p>Zoned SSDs (ZNS) make panel ② the rule. The host must write each zone in order and reset it whole, the one kind of writer §5's block map suits, so the drive can trade its "fully-associative" page map for coarse mappings per erase block, which "can significantly reduce or even completely eliminate the need for DRAM". Garbage collection and its spare space move up to the host, which then sets u itself. FairyWREN and Nemo run on such drives (<a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8.2</a>). <span class="src">Bjørling et al., ZNS, USENIX ATC 2021, abstract and §3.1</span></p>
+
+  <h3>10.3 · The papers' names for this page's numbers</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAPER WORD</th><th>ON THIS PAGE</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>DLWA</b> (device-level write amplification)</td><td>WA: flash bytes programmed for each byte the host sends, 1/(1−u) for the greedy victim.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td><b>OP</b> (overprovisioning)</td><td>Free space kept on purpose, the lever that holds u, and so DLWA, down.</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td><b>DWPD</b> (drive writes per day)</td><td>The erase budget spread over the years the drive must last: how many times a day its whole capacity may be written.</td><td class="c"><a href="#s3">§3</a>, link 4a</td></tr>
+        <tr><td><b>erase unit · zone</b></td><td>The block of page ②; drives stripe many together, so the unit the host sees is MB to GB (FairyWREN §3.1).</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s2">② §2</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<h3>10.4 · Next: page 3.5, then page ④</h3>
+  <p><a href="2026-10-08-storage-3-5-flash-caches.html"><b>Page 3.5</b></a> goes one layer up, into the cache software the OpenStd papers build: why a cache needs its own map from keys to places, how a log-structured and a set-associative cache find an object, why that map costs DRAM, and how the papers cut the bill. Read it before the papers, and before page ④'s §12.</p>
+  <p>The log-structured FTL is not original to SSDs. Ten years earlier the same idea, write everything to a fresh place and keep a map, was applied to a whole file system on a hard disk, for page ①'s reason: turn many small writes into one large sequential one. Page ④ rebuilds that system, LFS, and every cost on this page reappears there under a new name: garbage and the cleaner, liveness from a per-segment summary, a map (the inode map) that must itself be found after a crash. On the way to the papers, page ④'s §1, §2, §7, §9, §11 and §12 are needed; its other sections are tagged skip, each with a line on what, if anything, returns. <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">Page ④ §12</a> then lines the papers' caches up with LFS as a third layer: segments sized by the erase unit, a DRAM index in the imap's place, and eviction, which may drop what the cleaner must copy.</p>
+  
+  
+  <p class="gist ks"><span class="lbl">CARRY</span>The SSD's DLWA is 1/(1−u), and the writer above sets u: data that dies together, written together, empties whole blocks (DLWA ≈ 1); writes that mix lifetimes leave every victim part-live (Kangaroo's sets: 2–5× per erase). The papers' caches are that writer, and the SSD multiplies whatever they send. Their names for this page's numbers: DLWA, OP, DWPD. Next: <a href="2026-10-08-storage-3-5-flash-caches.html">page 3.5</a>.</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>What this page settled</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>IMPORTANCE</th><th>CLAIM</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td class="c">main</td><td>Rewrites leave dead pages; a dead page returns only when its whole block is erased.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">★ core</td><td>GC copies the victim's live pages to the log and erases it; liveness = the map still points at the page.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">★ core</td><td>WA = 1/(1−u), u = live fraction of the victim ≈ how full the flash is; client data before wear-out = erase budget ÷ WA; client write speed = flash write speed ÷ WA.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">main</td><td>Greedy victim: u ≤ L ÷ P<sub>full</sub>; trim lowers L, overprovisioning raises P<sub>full</sub>.</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td class="c">main</td><td>Page map = 1 GiB per TB; block map is small but makes small writes copy whole blocks.</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td class="c">main</td><td>Hybrid map: log blocks merged back by switch (free), partial, or full (expensive) merges.</td><td class="c"><a href="#s6">§6</a></td></tr>
+        <tr><td class="c">skim</td><td>Caching the page map works with locality; every map scheme trades memory for flash traffic.</td><td class="c"><a href="#s7">§7</a></td></tr>
+        <tr><td class="c">skim</td><td>Wear leveling moves cold data, paying extra writes for even wear.</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td class="c">main</td><td>SSDs win hugely on random I/O, modestly on sequential, and cost over 10× more per GB.</td><td class="c"><a href="#s9">§9</a></td></tr>
+        <tr><td class="c">main</td><td>The writer above sets u, so it sets DLWA: data that dies together, written together, empties whole blocks; mixed lifetimes leave victims part-live (Kangaroo's sets: 2–5× per erase). The papers' caches are that writer; zoned SSDs hand it the whole job. Names: DLWA, OP, DWPD. The cache itself: <a href="2026-10-08-storage-3-5-flash-caches.html">page 3.5</a>.</td><td class="c"><a href="#s10">§10</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ostep44">
+  <div class="sec-head"><h2>OSTEP 44, section by section</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>OSTEP 44</th><th>WHAT IT IS</th><th>COVERED IN</th></tr></thead>
+      <tbody>
+        <tr><td><b>44.1–44.2</b></td><td>Cells; banks, blocks, pages</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s2">② §2</a></td></tr>
+        <tr><td><b>44.3</b></td><td>Read, erase, program; the 8-bit example</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s3">② §3</a></td></tr>
+        <tr><td><b>44.4</b></td><td>Latency table, wear, disturbance</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s4">② §4</a></td></tr>
+        <tr><td><b>44.5</b></td><td>The FTL; write amplification and wear leveling defined</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s5">② §5</a></td></tr>
+        <tr><td><b>44.6</b></td><td>Direct mapping</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s6">② §6</a></td></tr>
+        <tr><td><b>44.7</b></td><td>Log-structured FTL; map persistence (OOB)</td><td><a href="2026-10-08-storage-2-flash-and-ftl.html#s7">② §7</a></td></tr>
+        <tr><td><b>44.8</b></td><td>Garbage collection; trim; overprovisioning</td><td><a href="#s1">③ §1–§4</a></td></tr>
+        <tr><td><b>44.9</b></td><td>Mapping table size: block, hybrid (three merges), caching</td><td><a href="#s5">③ §5–§7</a></td></tr>
+        <tr><td><b>44.10</b></td><td>Wear leveling</td><td><a href="#s8">③ §8</a></td></tr>
+        <tr><td><b>44.11</b></td><td>Performance and cost against hard disks</td><td><a href="#s9">③ §9</a></td></tr>
+        <tr><td><b>44.12</b></td><td>Summary; the "Key SSD terms" box; further reading</td><td><a href="#s10">③ §10</a>; the terms box makes a good self-check</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="series">
+  <div class="sec-head"><h2>The pages</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAGE</th><th>IMPORTANCE</th><th>QUESTION IT ANSWERS</th><th>STANDS IN FOR</th></tr></thead>
+      <tbody>
+        <tr><td><a href="2026-10-08-storage-1-hard-disk-rebuilt.html"><b>① The hard disk</b></a></td><td class="c">main</td><td>Why is random access slow, and what is the OS promised?</td><td>OSTEP 37.1–37.4</td></tr>
+        <tr><td><a href="2026-10-08-storage-2-flash-and-ftl.html"><b>② Flash and the FTL</b></a></td><td class="c">★ core</td><td>What can a flash chip not do, and how does the SSD still look like a disk?</td><td>OSTEP 44.1–44.7</td></tr>
+        <tr><td><b>③ Garbage and write amplification</b> (here)</td><td class="c">★ core</td><td>What does never overwriting cost, and how is the cost kept down?</td><td>OSTEP 44.8–44.12</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-5-flash-caches.html"><b>3.5 Flash caches</b></a></td><td class="c">★ core</td><td>How does a cache find a tiny object on flash, and why does that cost DRAM?</td><td>the papers' background sections</td></tr>
+        <tr><td><a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a></td><td class="c">main</td><td>How does a file system write only sequentially, and still find its data?</td><td>OSTEP 43</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="legend">
+  <div class="sec-head"><h2>Terms, symbols and figure marks</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>TERM OR MARK</th><th>MEANING</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Garbage · dead page</b></td><td>A programmed page no map entry points to any more.</td><td class="c"><a href="#fig-gc-wiki">F1</a> <a href="#fig-gc">F2</a></td></tr>
+        <tr><td><b>Live page · victim</b></td><td>A page the map still points to; the block the collector chooses to reclaim.</td><td class="c"><a href="#fig-gc">F2</a></td></tr>
+        <tr><td><b>N · u · WA</b></td><td>Pages per block; live pages of the victim ÷ N (0 ≤ u &lt; 1); flash bytes written ÷ client bytes written.</td><td class="c"><a href="#proof">§3</a> <a href="#fig-wa">F3</a></td></tr>
+        <tr><td><b>L · P<sub>full</sub></b></td><td>Live pages in full blocks; all pages in full blocks. Their ratio bounds the greedy victim's u.</td><td class="c"><a href="#fig-u">F4</a></td></tr>
+        <tr><td><b>Trim · overprovisioning</b></td><td>The command that tells the device a range of logical blocks is unused; flash built in beyond the advertised capacity.</td><td class="c"><a href="#fig-u">F4</a></td></tr>
+        <tr><td><b>Chunk · offset</b></td><td>In a block map, the logical address split into the part that goes through the map and the part used directly.</td><td class="c"><a href="#fig-blockmap">F5</a></td></tr>
+        <tr><td><b>Log block · log table · data table</b></td><td>In a hybrid map: blocks taking new writes, mapped per page; the per-page table for them; the per-block table for the rest.</td><td class="c"><a href="#fig-merge">F6</a></td></tr>
+        <tr><td><b>DLWA · OP · DWPD</b></td><td>The papers' names for §3's WA, §4's free space and link 4a's erase budget per day. ALWA, the cache's own factor, is <a href="2026-10-08-storage-3-5-flash-caches.html#s8">page 3.5 §8</a>.</td><td class="c"><a href="#fig-writer">F9</a>, <a href="#s10">§10.3</a></td></tr>
+        <tr><td><b>papers: needed · papers: skip</b></td><td>Whether the OpenStd papers use a section without explaining it; skip leaves the content in place.</td><td class="c">all §</td></tr>
+        <tr><td><b>Colors</b></td><td>Amber = live data; red, struck = dead; teal = free or freshly written; violet = copied by GC or a merge, or the number being followed.</td><td class="c">all</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>Leaves out · assumes</h2></div>
+  <p><b>Leaves out.</b> Collector policies beyond greedy, such as cost-benefit, and measured WA under real workloads. The details of DFTL's cache. How zoned SSDs (ZNS) work inside, beyond §10.2's paragraph: tree node 1.3.3. The papers' own mechanisms, such as Kangaroo's partitioned index, RRIParoo and Nemo's filter groups: the tree's 1.7 nodes; the parts that line up with LFS are in <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12</a>.</p>
+  <p><b>Assumes.</b> Pages ① and ②: the sector interface, the page/block split, the log-structured FTL and its map.</p>
+  <p><b>Next.</b> <a href="2026-10-08-storage-3-5-flash-caches.html"><b>3.5 Flash caches</b></a>: the cache above the SSD, the map it keeps in DRAM, and the papers. Then <a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a>: the same log, one layer up, on a hard disk, and in its <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">§12</a> the papers' caches as a third layer.</p>
+</section>
+
+</div>

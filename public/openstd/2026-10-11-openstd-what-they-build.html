@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenStd and the 10× cache</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture">
+  <span>쇼츠 강의</span><span>›</span><b style="color:var(--ink)">OpenStd 가 만드는 것</b>
+  <span class="sp dis">2026-10-11 · 출발: 지원 동기 3.5 "왜 진짜 이걸 하고 싶은가" · <a href="2026-10-08-storage-3-5-flash-caches.html">3.5</a> §0–§3 다음에 읽는다</span>
+</nav>
+
+<header>
+  <div class="eyebrow">쇼츠 강의 · 2026-10-11 · 중요도: main · 3.5 §0–§3 을 딛고, 3.5 §4–§9 보다 먼저</div>
+  <h1>OpenStd 가 만드는 것: SSD 위의 cache, 그리고 "10x cost efficiency" 가 나오는 자리</h1>
+  <p class="subtitle">대표님은 무엇을 만드는지 직접 말씀하셨다. "캐시는 … 보통 램(RAM)을 많이 활용했는데, 이제는 램 가격이 매우 비싸졌다. 그래서 우리는 솔리드스테이트드라이브(SSD)를 활용해 캐시 데이터베이스로 활용하면서, 램과 같은 성능을 내도록 하는 알고리즘을 설계하고 있다." OpenStd 사이트는 OpenKache 를 "a high-performance cache server designed for modern SSDs" 라고 소개한다. 채용 페이지는 target workload 에서 10x cost efficiency 를 목표로 걸고 논문 다섯 편을 든다. 이 페이지는 10× 가 어디서 나오는지, 무엇이 그것을 깎는지, 왜 Rust 와 io_uring 인지를 차례로 보인다. 3.5 는 §3 까지만 필요하다.</p>
+  <p class="src" style="white-space:normal">절 표시: ★ core = 한 줄도 빼지 않고 읽는다 · main = 읽는다 · skim = 그림과 CARRY 줄만 본다. 색은 3.5 와 같다. 보라 = server 의 DRAM · 노랑 = object 가 든 flash · 청록 = 지금의 하드웨어 · 빨강 = 비용, 또는 더는 맞지 않는 전제. 출처: 매일경제 2026-10-05 · openstd.com 과 10x.builders (2026-10-07, 2026-10-11) · GitHub 와 docs.rs (2026-10-07, <code>career/companies/openstd.md</code>) · <code>dummy/systems/</code> 의 논문 · 3.5.</p>
+</header>
+
+<section id="overview">
+  <div class="figure" id="fig-bill">
+    <div class="scroll">
+      <svg viewBox="0 0 760 372" width="760" role="img" aria-label="같은 cached data 의 청구서. 1 unit 은 그 bytes 를 flash 에 담는 값이다. DRAM cache 는 10 이다. object 100 B 마다 map 15 B 를 쓰는 flash cache 는 2.5 로 4배 싸다. object 마다 7 bits 를 쓰는 flash cache 는 1.09 로 9.2배 싸다. 같은 설계에서 flash 절반을 비워 두면 2.09 로 4.8배 싸다. 비율은 r ÷ (o + r·e/s) 이다">
+        <text x="16" y="20" font-size="12.5" class="ink" font-weight="600">같은 cached object 를 네 가지로 담는다. 1 unit = 그 bytes 를 flash 에 담는 값.</text>
+                <text x="16" y="56" font-size="11.5" class="ink" font-weight="600">① DRAM cache</text>
+        <text x="16" y="71" font-size="10" class="ink2">모든 object 를 DRAM 에 (Redis, Memcached)</text>
+        <rect x="260" y="44" width="460" height="30" rx="3" class="vios"/>
+        <text x="272" y="64" font-size="11" class="vio" font-weight="600">10.0 · 전부 DRAM</text>
+                <text x="16" y="104" font-size="11.5" class="ink" font-weight="600">② flash cache, 큰 map</text>
+        <text x="16" y="119" font-size="10" class="ink2">object 100 B 마다 map 15 B (3.5 §0)</text>
+        <rect x="260" y="92" width="46" height="30" rx="3" class="ambs"/>
+        <rect x="306" y="92" width="69" height="30" rx="3" class="vios"/>
+        <text x="385" y="112" font-size="11" class="ink" font-weight="600">2.5 → 4.0× 싸다</text>
+                <text x="16" y="152" font-size="11.5" class="ink" font-weight="600">③ flash cache, 작은 map</text>
+        <text x="16" y="167" font-size="10" class="ink2">object 마다 7 bits (Kangaroo, 3.5 §5)</text>
+        <rect x="260" y="140" width="46" height="30" rx="3" class="ambs"/>
+        <rect x="306" y="140" width="4" height="30" class="vios"/>
+        <text x="320" y="160" font-size="11" class="acc" font-weight="600">1.09 → 9.2× 싸다: 10× 가 사는 자리</text>
+                <text x="16" y="200" font-size="11.5" class="ink" font-weight="600">④ ③ 에서 flash 절반을 비움</text>
+        <text x="16" y="215" font-size="10" class="ink2">GC copy 를 줄이려고 남긴 빈 flash</text>
+        <rect x="260" y="188" width="46" height="30" rx="3" class="ambs"/>
+        <rect x="306" y="188" width="46" height="30" rx="3" style="fill:none;stroke:var(--amber);stroke-dasharray:4 3"/>
+        <rect x="352" y="188" width="4" height="30" class="vios"/>
+        <text x="366" y="208" font-size="11" class="stp" font-weight="600">2.09 → 4.8× 싸다</text>
+                <rect x="16" y="236" width="12" height="10" class="vios"/><text x="34" y="245" font-size="10" class="ink2">DRAM (data 또는 map)</text>
+        <rect x="160" y="236" width="12" height="10" class="ambs"/><text x="178" y="245" font-size="10" class="ink2">object 가 든 flash</text>
+        <rect x="290" y="236" width="12" height="10" style="fill:none;stroke:var(--amber);stroke-dasharray:3 2"/><text x="308" y="245" font-size="10" class="ink2">사 놓고 비운 flash</text>
+        <text x="440" y="245" font-size="10" class="mut">server 값은 막대에 없다: 조건 ③</text>
+                <rect x="16" y="260" width="728" height="74" rx="6" class="surf"/>
+        <text x="28" y="284" font-size="13" class="ink" font-weight="600">DRAM cache ÷ flash cache  =  r ÷ ( o + r · e/s )</text>
+        <text x="28" y="304" font-size="10.5" class="ink2">r = byte 당 DRAM 가격 ÷ flash 가격 ≈ 10 (Flashield Table 1) · e/s = object 당 map bytes ÷ object 크기</text>
+        <text x="28" y="322" font-size="10.5" class="ink2">o = 산 flash ÷ live object 가 든 flash (≥ 1) · 상한은 r 이고, o → 1, e/s → 0 일 때만 닿는다 (§1)</text>
+        <text x="16" y="358" font-size="10.5" class="vio" font-weight="600">openstd.com: “a DRAM-resident index, NVMe-backed data” = ②–④ 행. 할 일은 ② 를 ③ 으로 줄이고 ④ 로 밀리지 않는 것.</text>
+      </svg>
+    </div>
+    <p class="cap">그림 1. 청구서 하나, 설계 넷. 막대 길이는 실제 비율이다(10 unit = ① 행 전체). DRAM cache 는 모든 byte 에 DRAM 값을 낸다. flash cache 는 data 에 flash 값을 내고, map 에만 DRAM 값을 낸다. 그래서 flash cache 의 청구서는 노랑 막대에 보라 조각 하나를 더한 것이고, 그 조각의 폭은 object 당 bits 가 정한다. ② 행은 3.5 §0 의 문제를 숫자로 옮긴 것이다. ③ 행은 Kangaroo 의 7.0 bits 를 썼다. ④ 행은 write 때문에 비워 둔 flash 가 큰 map 만큼 비싸다는 것을 보인다. 아래 공식은 §1 에서 유도한다.</p>
+  </div>
+  <p class="gist why" id="must"><span class="lbl">MUST READ</span>그림 1 이 이 페이지의 전부다. 10× 는 DRAM 가격을 flash 가격으로 나눈 값이다. flash cache 는 map 이 object 당 몇 bits 이고, write 때문에 비워 두는 flash 가 적을 때만 그 10× 를 지킨다. 그림에 없는 세 번째 한계는 CPU 다. 이 CPU 가 언어와 I/O interface 를 정한다. §1 (★ core) 이 이 청구서를 증명하고, §3 이 Rust 와 io_uring 을 다룬다. §1 은 전부 읽고, §0, §2, §3 은 읽고, §4 는 훑는다.</p>
+</section>
+
+<section id="s0">
+  <div class="sec-head"><span class="n">§0</span><h2>"데이터베이스 아키텍처는 하드웨어의 발전을 따라가지 못하고 있습니다": 정확히 무엇이 못 따라갔나?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문제 · 왜</span></div>
+  <div class="figure" id="fig-gap">
+    <div class="scroll">
+      <svg viewBox="0 0 760 344" width="760" role="img" aria-label="세 줄: DRAM, flash write, CPU. 줄마다 지금의 하드웨어, software 가 전제한 것, 논문이 택한 방향이 있다. DRAM 은 flash 의 약 10배인데 cache 는 모든 object 를 DRAM 에 둔다. 논문은 data 를 flash 에 두고 map 을 몇 bits 로 줄인다. flash 는 erase 마다 닳고 새 drive 는 host 가 data 위치를 고르게 하는데, software 는 page 를 아무 데나 쓰고 GC 를 drive 에 맡긴다. 논문은 덜 받아들이고 크게 묶어 쓴다. NVMe drive 가 빨라서 CPU 가 한계가 됐는데, storage engine 은 정렬을 유지하고 lock 을 공유하고 I/O 마다 system call 을 낸다. 논문은 core 마다 나눠 갖고 I/O 를 batch 로 보낸다">
+        <text x="16" y="20" font-size="12.5" class="ink" font-weight="600">하드웨어가 깬 전제 셋</text>
+        <text x="128" y="44" font-size="11" class="acc" font-weight="600">지금의 하드웨어</text>
+        <text x="336" y="44" font-size="11" class="stp" font-weight="600">software 가 전제한 것</text>
+        <text x="552" y="44" font-size="11" class="ink" font-weight="600">논문들이 택한 방향</text>
+                <text x="16" y="76" font-size="11.5" class="vio" font-weight="600">① DRAM</text>
+        <rect x="128" y="54" width="200" height="62" rx="5" class="accs"/>
+        <text x="138" y="72" font-size="10.5" class="ink">byte 당 DRAM ≈ flash 의 10×,</text>
+        <text x="138" y="88" font-size="10.5" class="ink">server 당 용량도 고정 (3.5 §0)</text>
+        <text x="138" y="104" font-size="10.5" class="ink2">대표님: "램 가격이 매우 비싸졌다"</text>
+        <rect x="336" y="54" width="208" height="62" rx="5" class="stps"/>
+        <text x="346" y="72" font-size="10.5" class="ink">모든 object 를 DRAM 에 둔다</text>
+        <text x="346" y="88" font-size="10.5" class="ink">(Redis, Memcached 같은</text>
+        <text x="346" y="104" font-size="10.5" class="ink">in-memory cache)</text>
+        <rect x="552" y="54" width="192" height="62" rx="5" class="surf"/>
+        <text x="562" y="72" font-size="10.5" class="ink">data 는 flash 에, DRAM 엔</text>
+        <text x="562" y="88" font-size="10.5" class="ink">object 당 몇 bits 의 map</text>
+        <text x="562" y="104" font-size="10.5" class="ink2">Kangaroo, Nemo</text>
+                <text x="16" y="146" font-size="11.5" class="amb" font-weight="600">② flash write</text>
+        <rect x="128" y="124" width="200" height="62" rx="5" class="accs"/>
+        <text x="138" y="142" font-size="10.5" class="ink">flash 는 erase 마다 닳는다.</text>
+        <text x="138" y="158" font-size="10.5" class="ink">ZNS, FDP drive 는 host 가</text>
+        <text x="138" y="174" font-size="10.5" class="ink">erase unit 을 고르게 한다</text>
+        <rect x="336" y="124" width="208" height="62" rx="5" class="stps"/>
+        <text x="346" y="142" font-size="10.5" class="ink">4 KB page 를 아무 데나 쓰고</text>
+        <text x="346" y="158" font-size="10.5" class="ink">GC 는 drive 에 맡긴다. 두 층의</text>
+        <text x="346" y="174" font-size="10.5" class="ink">rewrite 가 곱해진다</text>
+        <rect x="552" y="124" width="192" height="62" rx="5" class="surf"/>
+        <text x="562" y="142" font-size="10.5" class="ink">덜 받아들이고, 크게 묶어</text>
+        <text x="562" y="158" font-size="10.5" class="ink">쓰고, 수명별로 둔다</text>
+        <text x="562" y="174" font-size="10.5" class="ink2">Flashield, FairyWREN, Nemo</text>
+                <text x="16" y="216" font-size="11.5" class="ink" font-weight="600">③ CPU</text>
+        <rect x="128" y="194" width="200" height="62" rx="5" class="accs"/>
+        <text x="138" y="212" font-size="10.5" class="ink">NVMe drive 는 I/O 여럿을</text>
+        <text x="138" y="228" font-size="10.5" class="ink">동시에 처리한다. 빨라져서</text>
+        <text x="138" y="244" font-size="10.5" class="ink">이제 CPU 가 한계가 된다</text>
+        <rect x="336" y="194" width="208" height="62" rx="5" class="stps"/>
+        <text x="346" y="212" font-size="10.5" class="ink">disk 위 정렬 유지, 공유 lock,</text>
+        <text x="346" y="228" font-size="10.5" class="ink">I/O 마다 system call 하나:</text>
+        <text x="346" y="244" font-size="10.5" class="ink">"CPU-bound on NVMe" (KVell)</text>
+        <rect x="552" y="194" width="192" height="62" rx="5" class="surf"/>
+        <text x="562" y="212" font-size="10.5" class="ink">core 마다 제 몫, 공유 없음.</text>
+        <text x="562" y="228" font-size="10.5" class="ink">I/O 는 batch 로 보낸다</text>
+        <text x="562" y="244" font-size="10.5" class="ink2">KVell, io_uring (§3)</text>
+                <rect x="16" y="272" width="728" height="58" rx="6" class="vios"/>
+        <text x="28" y="294" font-size="12" class="vio" font-weight="600">빨간 칸 셋이 "따라가지 못하고 있습니다" 의 내용이고, 그림 1 청구서의 세 몫이다.</text>
+        <text x="28" y="314" font-size="10.5" class="ink">① 의 전제가 보라 막대다. ② 의 전제가 o 를 키운다 (그림 2b 위). ③ 의 전제가 server 수를 늘린다 (그림 2b 아래).</text>
+      </svg>
+    </div>
+    <p class="cap">그림 2. 바뀐 것과 안 바뀐 것. 청록은 지금의 하드웨어다. 빨강은 software 가 아직 들고 있는 전제다. 회색은 논문 다섯 편이 택한 방향이다. ① 줄은 3.5 §0–§3 에서 이미 봤다. ② 와 ③ 줄은 그림 2b 가 숫자로 풀어 준다.</p>
+  </div>
+  <div class="figure" id="fig-gap2">
+    <div class="scroll">
+      <svg viewBox="0 0 760 556" width="760" role="img" aria-label="위: 새 object 100 B 가 flash 에 쓰는 양. cache 층이 4 KB set 을 통째로 다시 써서 ALWA 약 40, drive 층의 GC copy 가 u = 0.5 에서 2 배, 그래서 예시로 8 KB 가 쓰인다. 논문의 세 수: 다시 안 읽힐 object 는 안 쓴다(Flashield), 같은 set 으로 갈 object 를 모아 set 을 한 번 쓴다(Kangaroo, ALWA 5.8), 함께 지워질 data 를 한 erase block 에 둔다(FairyWREN, Nemo, DLWA 1). 아래: core 하나가 I/O 하나에 쓸 수 있는 시간. 2013 SATA SSD 는 11K write IOPS 라 91 µs, 2018 Optane 은 550K write IOPS 라 1.8 µs. 그 시간을 정렬 유지, 공유 lock, system call 이 먹는다. KVell 은 core 마다 나누고, disk 위에서 정렬하지 않고, I/O 를 모아 낸다">
+        <defs><marker id="h2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+                <text x="16" y="20" font-size="12.5" class="amb" font-weight="600">② write: 새 object 100 B 하나가 flash 에 얼마를 쓰게 하나 (예시 숫자)</text>
+        <rect x="16" y="34" width="140" height="62" rx="5" class="surf"/>
+        <text x="28" y="56" font-size="10.5" class="ink" font-weight="600">새 object</text>
+        <text x="28" y="74" font-size="10.5" class="ink">100 B</text>
+        <path d="M158 65 H184" class="arr" marker-end="url(#h2b)"/>
+        <rect x="188" y="34" width="210" height="62" rx="5" class="stps"/>
+        <text x="200" y="52" font-size="10.5" class="ink" font-weight="600">cache 층</text>
+        <text x="200" y="68" font-size="10.5" class="ink">set 하나 (4 KB) 를 통째로 다시 쓴다</text>
+        <text x="200" y="84" font-size="10.5" class="ink2">ALWA ≈ 40 (3.5 §3)</text>
+        <path d="M400 65 H426" class="arr" marker-end="url(#h2b)"/>
+        <rect x="430" y="34" width="176" height="62" rx="5" class="stps"/>
+        <text x="442" y="52" font-size="10.5" class="ink" font-weight="600">drive 층</text>
+        <text x="442" y="68" font-size="10.5" class="ink">GC 가 live page 를 copy</text>
+        <text x="442" y="84" font-size="10.5" class="ink2">DLWA = 1/(1−u), u = 0.5 면 2</text>
+        <path d="M608 65 H630" class="arr" marker-end="url(#h2b)"/>
+        <rect x="634" y="34" width="110" height="62" rx="5" class="stps"/>
+        <text x="644" y="52" font-size="10.5" class="ink" font-weight="600">flash 에 쓰임</text>
+        <text x="644" y="68" font-size="10.5" class="ink">100 B × 40 × 2</text>
+        <text x="644" y="84" font-size="10.5" class="stp" font-weight="600">= 8 KB</text>
+        <rect x="16" y="134" width="232" height="80" rx="5" class="surf"/>
+        <text x="28" y="152" font-size="10.5" class="ink" font-weight="600">덜 받기 · Flashield</text>
+        <text x="28" y="169" font-size="10.5" class="ink">다시 안 읽힐 object 는</text>
+        <text x="28" y="185" font-size="10.5" class="ink">flash 에 아예 쓰지 않는다</text>
+        <text x="28" y="203" font-size="10.5" class="acc" font-weight="600">맨 앞의 100 B 자체가 준다</text>
+        <rect x="264" y="134" width="232" height="80" rx="5" class="surf"/>
+        <text x="276" y="152" font-size="10.5" class="ink" font-weight="600">모아 쓰기 · Kangaroo</text>
+        <text x="276" y="169" font-size="10.5" class="ink">같은 set 으로 갈 object 여럿을</text>
+        <text x="276" y="185" font-size="10.5" class="ink">작은 log 에 모았다가 set 을 한 번</text>
+        <text x="276" y="203" font-size="10.5" class="acc" font-weight="600">ALWA 40 → 5.8 (3.5 §5)</text>
+        <rect x="512" y="134" width="232" height="80" rx="5" class="surf"/>
+        <text x="524" y="152" font-size="10.5" class="ink" font-weight="600">같이 두기 · FairyWREN, Nemo</text>
+        <text x="524" y="169" font-size="10.5" class="ink">함께 지워질 data 를 같은</text>
+        <text x="524" y="185" font-size="10.5" class="ink">erase block 에 (ZNS, FDP)</text>
+        <text x="524" y="203" font-size="10" class="acc" font-weight="600">block 이 통째로 죽어 u = 0, DLWA = 1</text>
+        <path d="M110 132 L86 100" class="arr" marker-end="url(#h2b)"/>
+        <path d="M360 132 L300 100" class="arr" marker-end="url(#h2b)"/>
+        <path d="M600 132 L540 100" class="arr" marker-end="url(#h2b)"/>
+        <text x="16" y="232" font-size="10.5" class="ink2">화살표는 각 논문이 위의 어느 칸을 줄이는지 가리킨다.</text>
+        <text x="16" y="250" font-size="10.5" class="ink">write 가 줄면 flash 가 덜 닳아 drive 를 덜 사고, 여유 공간도 덜 남긴다. 그래서 o 가 1 에 가까워진다.</text>
+        <path d="M16 262 H744" class="ln"/>
+                <text x="16" y="280" font-size="12.5" class="ink" font-weight="600">③ CPU: core 하나가 I/O 하나에 쓸 수 있는 시간 = 1 초 ÷ drive 의 write IOPS</text>
+        <text x="16" y="306" font-size="10.5" class="ink" font-weight="600">2013 SATA SSD</text>
+        <text x="16" y="321" font-size="10" class="ink2">11K write IOPS</text>
+        <rect x="170" y="296" width="480" height="24" rx="3" class="accs"/>
+        <text x="660" y="313" font-size="11" class="ink" font-weight="600">91 µs</text>
+        <text x="16" y="350" font-size="10.5" class="ink" font-weight="600">2018 Optane 905P</text>
+        <text x="16" y="365" font-size="10" class="ink2">550K write IOPS</text>
+        <rect x="170" y="340" width="10" height="24" rx="2" class="stps"/>
+        <text x="190" y="357" font-size="11" class="stp" font-weight="600">1.8 µs: 50 배 짧아졌다. core 는 그만큼 빨라지지 않았다</text>
+        <text x="16" y="386" font-size="9.5" class="mono mut">KVell Table 1 (Config-SSD 2013, Config-Optane 2018)</text>
+        <text x="16" y="410" font-size="10.5" class="ink2">그 1.8 µs 를 먹는 것 (KVell §3.1)</text>
+        <rect x="16" y="420" width="232" height="62" rx="5" class="stps"/>
+        <text x="28" y="438" font-size="10.5" class="ink" font-weight="600">정렬 유지</text>
+        <text x="28" y="455" font-size="10.5" class="ink">RocksDB 는 CPU 시간의 최대</text>
+        <text x="28" y="471" font-size="10.5" class="ink">60% 를 compaction 에 쓴다</text>
+        <rect x="264" y="420" width="232" height="62" rx="5" class="stps"/>
+        <text x="276" y="438" font-size="10.5" class="ink" font-weight="600">공유 lock</text>
+        <text x="276" y="455" font-size="10.5" class="ink">여러 thread 가 한 cache, index 를</text>
+        <text x="276" y="471" font-size="10.5" class="ink">만지며 서로 기다린다</text>
+        <rect x="512" y="420" width="232" height="62" rx="5" class="stps"/>
+        <text x="524" y="438" font-size="10.5" class="ink" font-weight="600">I/O 마다 system call</text>
+        <text x="524" y="455" font-size="10.5" class="ink">IOCP 의 ReadFile 처럼 I/O</text>
+        <text x="524" y="471" font-size="10.5" class="ink">하나가 kernel 진입 한 번</text>
+        <rect x="16" y="494" width="728" height="56" rx="6" class="vios"/>
+        <text x="28" y="515" font-size="11" class="vio" font-weight="600">KVell 의 답: core 마다 제 몫 (lock 없음) · disk 위 정렬 안 함 (정렬은 memory 에서) · I/O 를 모아 낸다</text>
+        <text x="28" y="535" font-size="10.5" class="ink">결과는 "close to device bandwidth" 다. OpenKache 의 "minimal sharing" 과 io_uring 이 이 줄이다 (§3).</text>
+      </svg>
+    </div>
+    <p class="cap">그림 2b. 그림 2 의 ② 와 ③ 줄을 숫자로. 위: object 하나의 write 가 cache 층과 drive 층을 지나며 곱해진다. 세 논문은 각자 한 칸을 줄인다. u = 0.5 는 예시이고, 실제 u 는 여유 공간이 정한다(페이지 ③). 아래: drive 가 50 배 빨라지자 I/O 하나에 쓸 수 있는 CPU 시간이 그만큼 줄었다. 예전엔 숨어 있던 정렬, lock, system call 비용이 이제 한계가 된다.</p>
+  </div>
+  <p>대표님의 Vision 은 문제를 한 문장으로 말한다. 데이터베이스 아키텍처가 하드웨어의 발전을 따라가지 못한다는 문장이다. 그림 2 는 이 문장을 전제 셋으로 나눈다. <span class="src">10x.builders Vision</span></p>
+  <p>첫째 전제는 DRAM 이다. Redis 와 Memcached 같은 in-memory cache 는 모든 object 를 DRAM 에 둔다. 대표님이 OpenStd 를 세운 이유도 DRAM 이 비싸졌다는 것이다. 3.5 §0 은 이것을 숫자로 봤다. 4.25 TB cache 는 DRAM 으로 $130,900 이고 SSD 로 $12,500 이다. <span class="src">매일경제 2026-10-05 · Flashield §1, Table 1 (3.5 §0, §6)</span></p>
+  <p>둘째 전제는 write 다. block interface 에 맞춘 software 는 4 KB page 를 아무 데나 쓰고 GC 는 drive 에 맡긴다. 페이지 ③ 은 그 비용을 drive 안에서 셌다. 3.5 §3 의 set-associative cache 는 100 B object 하나 때문에 4 KB set 전체를 다시 쓴다. flash 는 erase 마다 닳는다. 그래서 write 는 공짜가 아니라 예산이다. 새 drive (ZNS, FDP) 는 data 가 들어갈 erase unit 을 host 가 고르게 한다. FairyWREN 과 Nemo 가 이 손잡이를 쓴다. 그림 2b 위가 두 층의 곱셈과, 세 논문이 그중 어느 칸을 줄이는지를 보여 준다. <span class="src">페이지 ③ §10.2 · 3.5 §3 · 3.5 §8.2</span></p>
+  <p>셋째 전제는 CPU 다. KVell 의 abstract 가 그대로 말한다. "Logic to avoid random accesses, expensive operations for keeping data sorted on disk, and synchronization bottlenecks make these KVs CPU-bound on NVMe SSDs." drive 는 더 이상 느린 쪽이 아니다. software 가 스스로 하는 관리 작업이 느린 쪽이 됐다. KVell 이 잰 drive 의 write IOPS 는 2013 년 SATA SSD 의 11K 에서 2018 년 Optane 의 550K 로 50 배 늘었다. 그래서 core 하나가 I/O 하나에 쓸 수 있는 시간은 91 µs 에서 1.8 µs 로 줄었다 (그림 2b 아래). 예전에는 drive 를 기다리는 시간 뒤에 숨어 있던 정렬, lock, system call 비용이 이제 드러난다. <span class="src">Lepers et al., KVell, SOSP 2019, abstract, Table 1, §3.1</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>"따라가지 못한다" 는 전제 셋이다. data 는 DRAM 에 있어야 한다는 전제, write 는 drive 가 알아서 한다는 전제, I/O 당 CPU 는 싸다는 전제다. NVMe flash 가 셋을 다 깼다. 깨진 전제 하나가 청구서의 한 몫이 된다. map 에 드는 DRAM, write 때문에 사는 flash, CPU 때문에 사는 server 다.</p>
+</section>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>"10x cost efficiency" 는 어디서 나오고, 무엇이 그것을 깎나?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-his">어떤걸 · how</span></div>
+  <p>그림 1 이 이 절의 그림이다. 두 cache 에 같은 단위로 값을 매기고, 그 결과에서 조건 셋을 읽는다.</p>
+  <ol class="steps">
+    <li><div class="st"><b>bytes 에 값을 매긴다.</b><span>크기 s bytes 인 object 를 모아 모두 D bytes 를 cache 한다. flash 는 byte 당 p 이고, DRAM 은 byte 당 r·p 다. Flashield Table 1 은 실제 4.25 TB cache 의 r 을 준다. $130,900 ÷ $12,500 ≈ 10.5 이므로 r ≈ 10 이다. <span class="src">Flashield §1, Table 1 (3.5 §0, §6)</span></span></div></li>
+    <li><div class="st"><b>DRAM cache.</b><span>모든 byte 가 DRAM 에 있다. 그래서 C₁ = r·p·D 다. 그림 1 의 ① 행, 10 unit 이다.</span></div></li>
+    <li><div class="st"><b>flash cache 는 청구서가 둘이다.</b><span>하나는 flash 다. cache 는 o·D bytes 의 flash 를 산다. o = 산 flash ÷ live object 가 든 flash 이므로 o ≥ 1 이다. 다른 하나는 map 이다. object 는 D/s 개이고, 각각 DRAM 에 e bytes 의 map 이 필요하다 (3.5 §1). 그래서 map 값은 r·p·(D/s)·e 다. 둘을 더하면 C₂ = p·D·(o + r·e/s) 다.</span></div></li>
+    <li><div class="st"><b>나눈다.</b><span>C₁ ÷ C₂ = r ÷ (o + r·e/s) 다. 분모의 두 항은 0 이상이고 o ≥ 1 이므로, 이 비율은 r 을 넘지 못한다. 비율이 r 이 되는 것은 o = 1 이고 e = 0 일 때뿐이다. <b>10× 는 가격비가 정한 상한이다. 설계 선택은 거기서 깎기만 한다.</b></span></div></li>
+    <li><div class="st"><b>조건 ①, map.</b><span>object 100 B 당 map 이 15 B 이면 (3.5 §0) e/s = 0.15 이고 r·e/s = 1.5 다. 비율은 10 ÷ 2.5 = 4.0 이고, 이것이 ② 행이다. Kangaroo 의 7.0 bits 는 object 당 0.875 B 다. 그러면 r·e/s = 0.0875 이고, 비율은 10 ÷ 1.0875 ≈ 9.2 다. 이것이 ③ 행이다. 4× 와 9× 를 가르는 것은 map 크기이고, map 크기는 object 당 bits 하나로 정해진다. <span class="src">3.5 §0, §5</span></span></div></li>
+    <li><div class="st"><b>조건 ②, write.</b><span>o 는 write 때문에 cache 가 live object 없는 flash 를 가져야 할 때마다 커진다. 첫째 경로는 여유 공간이다. flash 를 비워 두면 GC 가 덜 copy 한다 (페이지 ③). CacheLib 은 50% overprovisioning 으로 device write amplification 을 낮춘다. 산 flash 의 절반이 비어 있으면 o = 2 이고, 비율은 10 ÷ 2.0875 ≈ 4.8 이다. 이것이 ④ 행이고, 큰 map 만큼 나쁘다. 둘째 경로는 마모다. flash 는 정해진 횟수만큼만 erase 를 견딘다. ALWA × DLWA 가 그 예산을 일찍 태우면, 같은 기간에 drive 를 다시 사야 한다. 이것은 시간에 퍼진 o 다. 3.5 §3 의 set cache 는 저장한 byte 당 약 40 bytes 를 flash 에 쓰므로 이 경우다. <span class="src">페이지 ③ §3–§4 · 3.5 §3, §8.1</span></span></div></li>
+    <li><div class="st"><b>조건 ③, CPU.</b><span>이 공식은 bytes 를 세고 server 를 세지 않는다. DRAM cache 는 server 당 DRAM 이 고정이라 여러 server 에 퍼진다. Flashield 의 DRAM 안은 server 17 대이고, SSD 안은 1 대다. 그 server 들을 대신하는 flash cache 는 더 적은 machine 으로 같은 초당 요청을 받아야 한다. server 가 두 배 필요하면 server 값이 돌아온다. KVell 의 발견은 NVMe 위에서는 drive 가 아니라 software 가 먼저 바닥난다는 것이다. <span class="src">Flashield Table 1 (3.5 §6) · KVell abstract</span></span></div></li>
+  </ol>
+  <p class="qed">그러므로 10× 는 r 이다. flash cache 는 세 조건이 함께 설 때만 그것을 지킨다. object 당 몇 bits 의 map (e/s → 0), flash 를 적게 비우고 적게 닳게 하는 write (o → 1), server 당 충분한 초당 요청이다. 채용 페이지의 논문 다섯 편은 각자 이 셋 중 하나를 맡는다 (§2).</p>
+  <p class="gist ks"><span class="lbl">CARRY</span>DRAM cache ÷ flash cache = r ÷ (o + r·e/s) 이고, r ≈ 10 이다. 상한은 가격비다. map (e/s), write (o), server (CPU) 가 각각 그 값을 끌어내린다. map 15 B 면 4× 가 남고, 7 bits 면 9.2× 가 남는다. flash 절반을 비우면 9.2× 가 4.8× 로 돌아간다.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>왜 이 논문 다섯 편이고, OpenStd 의 자기 소개는 무엇을 말하나?</h2><span class="tag t-what">main · read</span><span class="tag t-his">어떤걸</span></div>
+  <div class="figure" id="fig-grid">
+    <div class="scroll">
+      <svg viewBox="0 0 760 376" width="760" role="img" aria-label="논문 다섯 편과 조건 셋의 표. Flashield 는 object 당 약 30 bits 이고 다시 읽힐 object 만 받는다. Kangaroo 는 7.0 bits, ALWA 5.8 이다. FairyWREN 은 Kangaroo 의 배치에 zoned drive 를 써서 flash write 를 12.5배 줄인다. Nemo 는 8.3 bits, 전체 WA 1.56 이다. KVell 은 CPU 를 맡는다. 마지막 줄은 OpenKache 의 자기 소개다: a DRAM-resident index, NVMe-backed data, scale across CPU cores with minimal sharing">
+        <text x="144" y="22" font-size="11" class="vio" font-weight="600">① object 당 DRAM bits (e/s)</text>
+        <text x="348" y="22" font-size="11" class="amb" font-weight="600">② flash write (o)</text>
+        <text x="552" y="22" font-size="11" class="ink" font-weight="600">③ CPU (server 수)</text>
+        <path d="M16 32 H744" class="ln"/>
+                <text x="16" y="52" font-size="11.5" class="ink" font-weight="600">Flashield</text><text x="16" y="67" font-size="9.5" class="mono mut">NSDI 2019</text>
+        <text x="144" y="52" font-size="10.5" class="ink">~30 bits, 여전히 object 마다</text><text x="144" y="67" font-size="10.5" class="ink2">entry 하나 (Kangaroo 의 계산)</text>
+        <text x="348" y="52" font-size="10.5" class="ink">다시 읽힐 것으로 보이는</text><text x="348" y="67" font-size="10.5" class="ink2">object 만 flash 에 받는다</text>
+        <text x="552" y="52" font-size="10.5" class="mut">—</text>
+        <path d="M16 78 H744" class="ln"/>
+                <text x="16" y="98" font-size="11.5" class="ink" font-weight="600">Kangaroo</text><text x="16" y="113" font-size="9.5" class="mono mut">SOSP 2021</text>
+        <text x="144" y="98" font-size="10.5" class="ink" font-weight="600">object 당 7.0 bits</text><text x="144" y="113" font-size="10.5" class="ink2">set 앞에 작은 log (3.5 §5)</text>
+        <text x="348" y="98" font-size="10.5" class="ink">ALWA 5.8, 그냥 set 은</text><text x="348" y="113" font-size="10.5" class="ink2">~40 (3.5 §3)</text>
+        <text x="552" y="98" font-size="10.5" class="mut">—</text>
+        <path d="M16 124 H744" class="ln"/>
+                <text x="16" y="144" font-size="11.5" class="ink" font-weight="600">FairyWREN</text><text x="16" y="159" font-size="9.5" class="mono mut">OSDI 2024</text>
+        <text x="144" y="144" font-size="10.5" class="ink">Kangaroo 의 배치</text>
+        <text x="348" y="144" font-size="10.5" class="ink" font-weight="600">flash write 12.5× 감소</text><text x="348" y="159" font-size="10.5" class="ink2">Kangaroo 대비, ZNS/FDP 위</text>
+        <text x="552" y="144" font-size="10.5" class="mut">—</text>
+        <path d="M16 170 H744" class="ln"/>
+                <text x="16" y="190" font-size="11.5" class="ink" font-weight="600">Nemo</text><text x="16" y="205" font-size="9.5" class="mono mut">ASPLOS 2026</text>
+        <text x="144" y="190" font-size="10.5" class="ink">8.3 bits, Bloom filter 를</text><text x="144" y="205" font-size="10.5" class="ink2">일부 flash 에 둔다</text>
+        <text x="348" y="190" font-size="10.5" class="ink" font-weight="600">전체 WA 1.56, DLWA ≈ 1</text><text x="348" y="205" font-size="10.5" class="ink2">set-group 을 통째로 한 번 쓴다</text>
+        <text x="552" y="190" font-size="10.5" class="mut">—</text>
+        <path d="M16 216 H744" class="ln"/>
+                <text x="16" y="236" font-size="11.5" class="ink" font-weight="600">KVell</text><text x="16" y="251" font-size="9.5" class="mono mut">SOSP 2019</text>
+        <text x="144" y="236" font-size="10.5" class="mut">— cache 가 아니라 store</text>
+        <text x="348" y="236" font-size="10.5" class="mut">—</text>
+        <text x="552" y="236" font-size="10.5" class="ink" font-weight="600">core 마다 공유 없음,</text><text x="552" y="251" font-size="10.5" class="ink2">batch I/O, 정렬 안 함</text>
+                <rect x="8" y="270" width="744" height="66" rx="6" class="vios"/>
+        <text x="16" y="292" font-size="11.5" class="vio" font-weight="600">OpenKache</text><text x="16" y="307" font-size="9.5" class="mono mut">openstd.com</text>
+        <text x="144" y="292" font-size="10.5" class="ink" font-weight="600">“a DRAM-resident index”</text><text x="144" y="307" font-size="10.5" class="ink2">몇 bits 인지: 비공개</text>
+        <text x="348" y="292" font-size="10.5" class="ink" font-weight="600">“NVMe-backed data”</text><text x="348" y="307" font-size="10.5" class="ink2">어떤 write 방식인지: 비공개</text>
+        <text x="552" y="292" font-size="10.5" class="ink" font-weight="600">“scale across CPU cores</text><text x="552" y="307" font-size="10.5" class="ink" font-weight="600">with minimal sharing”</text>
+        <text x="16" y="326" font-size="10" class="ink2">사이트의 세 구절이 §1 의 세 조건을 하나씩 부른다.</text>
+        <text x="16" y="360" font-size="10" class="mut">숫자는 모두 각 논문이 자기 trace 에서 잰 값이다. 그래서 한 눈금 위에 있지 않다 (3.5 §8).</text>
+      </svg>
+    </div>
+    <p class="cap">그림 3. 논문 다섯 편과 §1 의 조건 셋. 논문마다 한 열을 맡고 나머지는 둔다. 보라 줄은 OpenStd 가 자기 server 를 소개한 말이다. 숫자는 3.5 §8 에서 가져왔고, 3.5 §8 이 논문마다 출처를 단다. 구조는 3.5 §4–§9 에 있다.</p>
+  </div>
+  <p>열을 따라 내려가며 읽는다. cache 논문 넷은 ① 과 ② 를 맡는다. Flashield 는 입구에서 write 를 줄이지만 object 마다 map entry 를 하나씩 둔다. Kangaroo 는 map 을 7.0 bits 로, rewrite 를 5.8 로 낮춘다. FairyWREN 은 zoned drive 로 Kangaroo 의 flash write 를 12.5× 줄인다. Nemo 는 상용 ZNS drive 에서 다시 재고, set-group 을 통째로 한 번 써서 8.3 bits 와 전체 WA 1.56 에 닿는다. ③ 을 맡는 것은 KVell 하나다. <span class="src">3.5 §8.2 와 각 논문의 §1</span></p>
+  <p>OpenStd 는 OpenKache 를 세 구절로 소개한다. "a DRAM-resident index, NVMe-backed data, and an architecture designed to scale across CPU cores with minimal sharing." 이 세 구절이 세 열과 맞물린다. 그러니 채용 페이지의 논문 목록은 flash 일반의 읽을거리가 아니다. §1 공식의 세 항을 다룬 문헌이다. <span class="src">openstd.com (2026-10-07)</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Flashield, Kangaroo, FairyWREN, Nemo 는 map (e/s) 과 write (o) 를 줄인다. KVell 은 CPU 가 한계가 되지 않게 한다. OpenKache 의 소개도 같은 셋을 부른다. DRAM-resident index, NVMe-backed data, core 사이의 최소 공유다.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>왜 Rust, io_uring, QUIC, Redis protocol 인가?</h2><span class="tag t-what">main · read</span><span class="tag t-his">how</span></div>
+  <div class="figure" id="fig-io">
+    <div class="scroll">
+      <svg viewBox="0 0 760 270" width="760" role="img" aria-label="I/O 를 기다리는 두 방식. readiness 방식은 webserv 의 epoll, kqueue 다. 어떤 fd 가 준비됐는지 묻는다. socket 은 bytes 가 오면 준비되지만, epoll 은 regular file 을 거부하므로 disk read 는 여전히 막힌다. completion 방식은 io_uring 과 Windows IOCP 다. 요청을 submission ring 에 쓰고, kernel 과 NVMe drive 가 처리하고, 결과가 completion ring 에 나온다. system call 하나로 요청 여럿을 낸다">
+        <defs><marker id="h3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <rect x="16" y="12" width="356" height="246" rx="8" style="fill:none;stroke:var(--line-2);stroke-dasharray:5 4"/>
+        <text x="28" y="32" font-size="12" class="ink" font-weight="600">Readiness: epoll, kqueue (webserv 의 loop)</text>
+        <rect x="28" y="44" width="332" height="36" rx="5" class="surf"/>
+        <text x="40" y="66" font-size="10.5" class="mono ink">epoll_wait(): 어떤 fd 가 준비됐나?</text>
+        <rect x="28" y="92" width="160" height="56" rx="5" class="accs"/>
+        <text x="38" y="110" font-size="10.5" class="ink" font-weight="600">socket</text>
+        <text x="38" y="126" font-size="10.5" class="ink">bytes 가 오면 준비되고,</text>
+        <text x="38" y="141" font-size="10.5" class="ink">그때 read() 는 곧 돌아온다</text>
+        <rect x="200" y="92" width="160" height="56" rx="5" class="stps"/>
+        <text x="210" y="110" font-size="10.5" class="stp" font-weight="600">regular file</text>
+        <text x="210" y="126" font-size="10.5" class="ink">epoll_ctl() → EPERM.</text>
+        <text x="210" y="141" font-size="10.5" class="ink">file 은 "기다릴" 수 없다</text>
+        <text x="28" y="174" font-size="10.5" class="ink">그래서 disk read() 는 drive 가 일하는 동안</text>
+        <text x="28" y="190" font-size="10.5" class="ink">thread 를 막고, I/O 하나가 system call 하나다.</text>
+        <text x="28" y="214" font-size="10.5" class="ink2">"준비됐나?" 는 data 가 스스로 오는 network 에</text>
+        <text x="28" y="230" font-size="10.5" class="ink2">맞는다. disk 는 요청해야만 답한다.</text>
+        <text x="28" y="250" font-size="9.5" class="mono mut">man 2 epoll_ctl, ERRORS: EPERM</text>
+        <rect x="388" y="12" width="356" height="246" rx="8" style="fill:none;stroke:var(--line-2);stroke-dasharray:5 4"/>
+        <text x="400" y="32" font-size="12" class="ink" font-weight="600">Completion: io_uring (Linux), IOCP (Windows)</text>
+        <rect x="400" y="44" width="150" height="40" rx="5" class="ambs"/>
+        <text x="410" y="61" font-size="10.5" class="ink" font-weight="600">submission ring</text>
+        <text x="410" y="76" font-size="10" class="ink2">program 이 요청을 쓴다</text>
+        <rect x="582" y="44" width="150" height="40" rx="5" class="accs"/>
+        <text x="592" y="61" font-size="10.5" class="ink" font-weight="600">completion ring</text>
+        <text x="592" y="76" font-size="10" class="ink2">kernel 이 결과를 쓴다</text>
+        <rect x="400" y="110" width="332" height="36" rx="5" class="surf"/>
+        <text x="412" y="132" font-size="10.5" class="ink">kernel + NVMe drive: 요청 여럿이 동시에 진행</text>
+        <path d="M475 85 V108" class="arr" marker-end="url(#h3a)"/>
+        <path d="M657 109 V86" class="arr" marker-end="url(#h3a)"/>
+        <text x="400" y="172" font-size="10.5" class="ink">두 ring 은 kernel 과 공유하는 memory 다. 그래서</text>
+        <text x="400" y="188" font-size="10.5" class="ink">system call 하나로 batch 를 통째로 내고, polling</text>
+        <text x="400" y="204" font-size="10.5" class="ink">mode 에선 그것도 없다. disk 와 network 가 같아진다.</text>
+        <text x="400" y="228" font-size="10.5" class="vio" font-weight="600">KVell 의 "batching of device accesses" 의 kernel API 판</text>
+        <text x="400" y="250" font-size="9.5" class="mono mut">Axboe, "Efficient IO with io_uring" (2019)</text>
+      </svg>
+    </div>
+    <p class="cap">그림 4. I/O 를 기다리는 두 방식. 왼쪽은 webserv event loop 의 readiness 방식이다. "이 fd 가 준비됐나?" 를 묻고, socket 에는 맞지만 disk file 에는 안 맞는다. 오른쪽은 completion 방식이다. program 이 요청을 줄 세우고 결과를 거둔다. Windows 의 IOCP 와 Linux 의 io_uring 이 이 방식이다.</p>
+  </div>
+  <p>webserv 에서 출발한다. webserv 의 event loop 는 epoll 이나 kqueue 에 어떤 fd 가 준비됐는지 묻는다. 이 물음은 bytes 가 스스로 오는 socket 에 맞는다. disk 는 요청받기 전에는 아무것도 하지 않는다. Linux 의 epoll 은 regular file 을 아예 거부한다 (EPERM). 그래서 readiness loop 에서 disk read() 는 device 접근 내내 thread 를 막고, I/O 하나에 system call 하나를 쓴다 (그림 4 왼쪽). KVell 이 잰 CPU 비용이 이것이다. drive 는 요청 여럿을 동시에 받을 수 있는데, software 가 그것을 하나씩 내느라 cycle 을 쓴다. io_uring 은 물음을 queue 로 바꾼다 (오른쪽). program 은 kernel 과 공유하는 ring 에 요청을 쓰고, 결과는 두 번째 ring 으로 돌아온다. 그래서 system call 하나로 batch 를 내고, polling mode 에서는 그것도 필요 없다. Windows 에서 IOCP 가 주는 모델이 이것이다. <span class="src">man 2 epoll_ctl · Axboe 2019 · KVell §1</span></p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>선택</th><th>어디서 보이나</th><th>조건</th><th>이유, 그리고 얼마나 확실한가</th></tr></thead>
+      <tbody>
+        <tr><td><b>io_uring</b> (Compio 위)</td><td>docs.rs openkache 0.1.3 · issue "keep GET concurrency saturated"</td><td class="c">③</td><td>I/O 를 batch 로 묶고, 적은 system call 로 요청 여럿을 진행 중으로 둔다 (그림 4). Compio 는 io_uring 과 IOCP 위의 thread-per-core Rust runtime 이다. 이것은 "scale across CPU cores with minimal sharing" 과 맞물린다. 스택은 문서에 적혀 있고, 이유는 KVell 의 논리다.</td></tr>
+        <tr><td><b>Rust</b> (1.85, edition 2024)</td><td>crates.io openkache · client 전체</td><td class="c">① ③</td><td>C++ 처럼 memory 배치를 손으로 정하고 GC 가 없다. 그래서 index 를 object 당 몇 bits 로 꽉 채울 수 있고, GC pause 가 tail latency 에 끼지 않는다 (사이트의 P99 ≈ 0.7 ms 는 "Early local measurements; not a production benchmark" 라고 달려 있다). C++ 와 달리 compiler 가 data race 를 거부한다. 값은 바꿀 수 있는 owner 하나를 갖거나, 바꿀 수 없는 reader 여럿을 갖는다. core 마다 나눠 갖고 공유하지 않는 설계가 검사받고 싶은 규칙이 바로 이것이다. OpenStd 가 밝힌 이유가 아니라 설계에서 끌어낸 추론이다.</td></tr>
+        <tr><td>Rust, 두 번째 이유</td><td>10x.builders Vision · 저장소 contributor 목록</td><td class="c">—</td><td>대표님은 "거의 모든 코드가 LLM으로 작성될 미래에 formal verification이 점점 더 중요해질 텐데" 라고 쓴다. 저장소 contributor 목록에는 <code>claude</code> 가 있다. 매 build 마다 memory bug 와 concurrency bug 를 종류째 거부하는 compiler 는 사람이 치지 않은 code 를 검사하는 싼 첫걸음이다. 공개된 사실 둘에서 끌어낸 추론이다.</td></tr>
+        <tr><td><b>QUIC</b> (quinn)</td><td>docs.rs · issue "native transport deadlines"</td><td class="c">③</td><td>connection 하나에 서로 독립인 stream 이 여럿 있다. 그래서 packet 하나를 잃어도 그 stream 만 멈춘다. TCP 라면 그 뒤의 요청이 모두 멈춘다. 암호화도 내장이다. cache 에서는 느린 요청 하나가 다른 요청의 P99 를 올리지 않게 한다. 추론이고, QUIC 의 성질은 RFC 9000 의 것이다.</td></tr>
+        <tr><td><b>RESP</b> 호환 TCP</td><td>docs.rs</td><td class="c">—</td><td>RESP 는 Redis 의 wire protocol 이다. 그래서 기존 Redis client 와 도구가 그대로 붙는다. 채용 페이지의 목표인 "이 카테고리의 새로운 표준(Defacto Standard)" 으로 가는 가장 싼 길이다. 추론이다.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="gist"><span class="lbl">CARRY</span>io_uring 은 kernel 자신의 batch 로 조건 ③ 에 답한다. 요청을 넣고 결과를 거두며 system call 은 적다. webserv 의 epoll 은 file 을 기다리지도 못한다. Rust 는 C++ 의 memory 통제와 GC pause 없음을 주고, data race 를 거부하는 compiler 를 더한다. 이것은 공유 없는 code 와 AI 가 쓴 code 에 맞는다. QUIC 은 client 연결의 tail latency 를 지키고, RESP 는 Redis 사용자가 넘어오게 한다.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>무엇이 공개되지 않았나?</h2><span class="tag t-ctl">skim · figure + carry</span></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>공개되지 않은 것</th><th>공개된 것</th><th>§1 에서 정하는 것</th></tr></thead>
+      <tbody>
+        <tr><td>target workload</td><td>"target workload에서 10x cost efficiency" · "자세한 내용은 여기에 공개하지는 않겠지만"</td><td>object 크기 s 와 read/write 비율, 곧 e/s 와 o 둘 다</td></tr>
+        <tr><td>server 의 설계 세부</td><td>사이트의 세 구절 (그림 3)</td><td>index 가 object 당, set 당, group 당 중 어느 배치인지</td></tr>
+        <tr><td>roadmap 과 production 수치</td><td>287k ops/s 와 P99 ≈ 0.7 ms, "Early local measurements; not a production benchmark" 단서</td><td>조건 ③ 이 규모에서도 서는지</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="gist"><span class="lbl">CARRY</span>공개되지 않은 것이 바로 세 항을 정하는 값이다. workload 가 e/s 와 o 를 정하고, server 의 배치가 e 를 정하고, production 수치가 ③ 을 보여 줄 것이다. 셋 다 직접 여쭤보고 싶은 질문이다.</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>이 페이지가 정한 것</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>중요도</th><th>주장</th><th>어디</th></tr></thead>
+      <tbody>
+        <tr><td class="c">main</td><td>"하드웨어를 못 따라간다" = 깨진 전제 셋이다. data 는 DRAM 에, write 는 drive 에게, I/O 당 CPU 는 싸다.</td><td class="c"><a href="#s0">§0</a></td></tr>
+        <tr><td class="c">★ core</td><td>DRAM cache ÷ flash cache = r ÷ (o + r·e/s), r ≈ 10. 상한은 가격비이고, map, write, CPU 가 거기서 깎는다 (4.0× · 9.2× · 4.8×).</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">main</td><td>논문 다섯 편이 항을 하나씩 맡는다. OpenKache 의 소개도 같은 셋을 부른다.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">main</td><td>io_uring = ③ 을 위한 batch completion I/O. Rust = GC 없는 memory 통제와 compiler 가 검사하는 공유. QUIC = tail latency. RESP = Redis 사용자가 넘어온다.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">skim</td><td>공개되지 않은 것은 workload, server 의 설계 세부, production 수치다. 모두 §1 의 세 항에 들어갈 값이다.</td><td class="c"><a href="#s4">§4</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+
+
+<section id="legend">
+  <div class="sec-head"><h2>그림 기호</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>기호</th><th>뜻</th></tr></thead>
+      <tbody>
+        <tr><td>r</td><td>byte 당 DRAM 가격 ÷ byte 당 flash 가격, 약 10</td></tr>
+        <tr><td>e/s</td><td>object 당 map bytes ÷ object 당 bytes. 100 B object 에 7 bits 이면 0.875 ÷ 100</td></tr>
+        <tr><td>o</td><td>산 flash ÷ live object 가 든 flash. drive 수명 전체로 센다</td></tr>
+        <tr><td>ALWA, DLWA</td><td>cache 자신의 rewrite, 그리고 그 밑에서 drive 의 GC 가 하는 copy. 둘은 곱해진다 (3.5 §8.1)</td></tr>
+        <tr><td>ZNS, FDP</td><td>data 가 들어갈 erase unit 을 host 가 고르게 하는 SSD interface (페이지 ③ §10.2)</td></tr>
+        <tr><td>EPERM</td><td>epoll 이 볼 수 없는 fd 에 epoll_ctl 이 돌려주는 error. regular file 이 그 예다</td></tr>
+        <tr><td>submission / completion ring</td><td>program 과 kernel 이 공유하는 memory 위의 io_uring queue 둘</td></tr>
+        <tr><td>RESP</td><td>Redis serialization protocol, Redis 의 wire format</td></tr>
+        <tr><td>QUIC</td><td>UDP 위의 transport. stream 이 서로 독립이고 암호화가 내장이다 (RFC 9000)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>안 다루는 것 / 전제</h2></div>
+  <div class="tablewrap">
+    <table>
+      <tbody>
+        <tr><td><b>안 다루는 것</b></td><td>각 논문이 숫자를 얻는 구조 (3.5 §4–§9, 그다음 논문) · ZNS 와 FDP 의 command set · Rust 언어 자체 · 비공개인 benchmark.</td></tr>
+        <tr><td><b>전제</b></td><td>3.5 §0–§3: DRAM 대 flash, 4 KB page, FTL, object 마다 entry 하나인 cache map, log-structured cache, ~40× rewrite 의 set-associative cache · 페이지 ③ 의 erase 예산과 write amplification · webserv 의 epoll/kqueue loop.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</div>

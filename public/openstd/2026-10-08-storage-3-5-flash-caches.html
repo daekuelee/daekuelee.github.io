@@ -1,0 +1,1503 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash caches and DRAM</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture series">
+  <span>쇼츠 강의</span><span>›</span><span>Storage: OSTEP 37 → 44 → 43</span>
+  <span class="sp"><a href="2026-10-08-storage-1-hard-disk-rebuilt.html">① Hard disk</a> · <a href="2026-10-08-storage-2-flash-and-ftl.html">② Flash + FTL ★</a> · <a href="2026-10-08-storage-3-garbage-and-write-amplification.html">③ Garbage + WA ★</a> · <b style="color:var(--ink)">3.5 Flash cache ★</b> · <a href="2026-10-08-storage-4-log-structured-file-system.html">④ LFS</a> · <a href="https://www.youtube.com/watch?v=5Mh3o886qpg">▶ Video (YouTube)</a></span>
+</nav>
+
+<header>
+  <div class="eyebrow">Short lecture · 2026-10-10 · page 3.5, between ③ and ④ · importance: ★ core for the papers · stands in for the background sections of the OpenStd papers</div>
+  <h1>3.5 Flash caches: how a cache finds a 100-byte object, and why that costs DRAM</h1>
+  <p class="subtitle">Page ③ closed the SSD's own books: its FTL map and its garbage collection live inside the drive and cost little. This page opens a second problem, one layer up. Large services cache billions of objects of about 100 bytes, DRAM is too expensive to hold them, so the cache moves onto SSDs. An SSD takes only page numbers, so the cache needs a second map, from keys to pages, in the server's DRAM, and with objects 40 times smaller than a page that map costs more DRAM than the flash it points into. §0 states that problem against page ③; §1–§5 show how a cache finds an object; §6–§9 take the cost by why, what, how and when.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read. The dotted tag is his outline: 문제 · 왜 first (§0), then 문맥 (context), then 어떤걸 · how · when. Every section is needed for the papers. Colors: violet = what lives in the server's DRAM (the cache's map, filters) · amber = objects on flash · teal = the SSD's own layer, or a cost kept low · red = a cost.</p>
+</header>
+
+<section id="overview">
+  <div class="figure" id="fig-stack">
+    <div class="scroll">
+      <svg viewBox="0 0 760 648" width="760" role="img" aria-label="Three things called DRAM, and a review of the LBA. In the server's main memory: a DRAM cache holding the hottest objects themselves, and the flash cache's own map from keys to pages, which is new on this page. A read then goes to the SSD with a page number, never a key. Inside the SSD: the FTL map in the controller's own DRAM, from page numbers to chip locations, settled on pages two and three, and the flash chips holding the objects. The backend database is asked only when both caches miss">
+        <defs><marker id="h1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12.5" class="ink" font-weight="600">Three things on this page are called DRAM. Only ① is new.</text>
+        <rect x="16" y="32" width="504" height="192" rx="8" style="fill:none;stroke:var(--line-2);stroke-dasharray:5 4"/>
+        <text x="28" y="50" font-size="11.5" class="ink" font-weight="600">the server: its main memory (DRAM), where the cache software runs</text>
+        <text x="28" y="70" font-size="10.5" class="mono ink2">app code: get("user:42 friend:9")</text>
+        <rect x="28" y="80" width="480" height="48" rx="5" class="surf"/>
+        <text x="40" y="99" font-size="12" class="ink" font-weight="600">DRAM cache: the hottest objects themselves</text>
+        <text x="40" y="117" font-size="10.5" class="ink2">values, not a map · under 1% of the capacity · asked first</text>
+        <rect x="28" y="138" width="480" height="76" rx="5" class="vios"/>
+        <circle cx="44" cy="156" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="44" y="160" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="58" y="160" font-size="12" class="vio" font-weight="600">the flash cache’s map: key → logical address</text>
+        <text x="58" y="182" font-size="11" class="mono ink">key "user:42 friend:9"  →  logical page 7,341, byte 1,200</text>
+        <text x="58" y="203" font-size="10.5" class="ink2">one entry per object: new on this page, and its problem</text>
+        <rect x="536" y="80" width="208" height="62" rx="5" class="surf"/>
+        <text x="548" y="99" font-size="12" class="ink" font-weight="600">backend database</text>
+        <text x="548" y="117" font-size="10.5" class="ink2">slow; asked only when</text>
+        <text x="548" y="132" font-size="10.5" class="ink2">both caches miss</text>
+        <path d="M520 110 H534" class="arr" marker-end="url(#h1a)"/>
+        <text x="536" y="164" font-size="11" class="stp" font-weight="600">new on this page</text>
+        <text x="536" y="180" font-size="10.5" class="ink">one entry per ~100 B object:</text>
+        <text x="536" y="195" font-size="10.5" class="ink">≥ 15% of the data; at DRAM’s</text>
+        <text x="536" y="210" font-size="10.5" class="ink">price, more than the flash (§7)</text>
+        <path d="M60 216 V268" class="arr" marker-end="url(#h1a)"/>
+        <text x="70" y="244" font-size="10.5" class="vio" font-weight="600">write(7,341): the cache picked 7,341,</text>
+        <text x="70" y="260" font-size="10.5" class="ink2">so it can record key → 7,341 in ①</text>
+        <path d="M300 216 V268" class="arr" marker-end="url(#h1a)"/>
+        <text x="310" y="244" font-size="10.5" class="mut">read(7,341) later: an address, never a key;</text>
+        <text x="310" y="260" font-size="10.5" class="mut">the cache never learns the chip</text>
+        <rect x="16" y="272" width="504" height="158" rx="8" style="fill:none;stroke:var(--line-2);stroke-dasharray:5 4"/>
+        <text x="28" y="290" font-size="11.5" class="ink" font-weight="600">the SSD: a block device, asked only to read or write logical pages (LBAs)</text>
+        <rect x="28" y="300" width="480" height="70" rx="5" class="accs"/>
+        <circle cx="44" cy="318" r="8" style="fill:var(--surface);stroke:var(--accent)"/><text x="44" y="322" font-size="10" class="acc" font-weight="600" text-anchor="middle">2</text>
+        <text x="58" y="322" font-size="12" class="acc" font-weight="600">FTL map, in the controller’s firmware: logical → physical</text>
+        <text x="58" y="343" font-size="11" class="mono ink">logical page 7,341  →  physical block 88, page 12</text>
+        <text x="58" y="362" font-size="10.5" class="ink2">one entry per 4 KB page, about 1 GB per TB</text>
+        <rect x="28" y="378" width="480" height="44" rx="5" class="ambs"/>
+        <text x="40" y="396" font-size="11.5" class="ink" font-weight="600">flash chips: the objects, packed about 40 to a 4 KB page</text>
+        <text x="40" y="413" font-size="10.5" class="ink2">≈ 99% of the cache’s capacity</text>
+        <text x="536" y="306" font-size="11" class="acc" font-weight="600">settled on pages ② and ③</text>
+        <text x="536" y="322" font-size="10.5" class="acc">only the FTL knows this step;</text>
+        <text x="536" y="338" font-size="10.5" class="ink">one entry per 4 KB page:</text>
+        <text x="536" y="353" font-size="10.5" class="ink">0.1% of the data; garbage</text>
+        <text x="536" y="368" font-size="10.5" class="ink">collection stays in the drive</text>
+        <text x="536" y="388" font-size="11" class="acc" font-weight="600">its promise to the cache:</text>
+        <text x="536" y="403" font-size="10.5" class="ink">read(p) returns what was last</text>
+        <text x="536" y="418" font-size="10.5" class="ink">written to p, wherever garbage</text>
+        <text x="536" y="433" font-size="10.5" class="ink">collection moved it (② §7)</text>
+        <rect x="16" y="446" width="728" height="138" rx="6" class="surf"/>
+        <text x="28" y="466" font-size="12" class="ink" font-weight="600">LBA, a quick review: the numbers a drive shows the outside (page ① §3)</text>
+        <rect x="28" y="476" width="40" height="24" rx="3" style="fill:var(--surface);stroke:var(--line-2)"/><text x="48" y="492" font-size="10.5" class="mono ink2" text-anchor="middle">0</text>
+        <rect x="72" y="476" width="40" height="24" rx="3" style="fill:var(--surface);stroke:var(--line-2)"/><text x="92" y="492" font-size="10.5" class="mono ink2" text-anchor="middle">1</text>
+        <rect x="116" y="476" width="40" height="24" rx="3" style="fill:var(--surface);stroke:var(--line-2)"/><text x="136" y="492" font-size="10.5" class="mono ink2" text-anchor="middle">2</text>
+        <rect x="160" y="476" width="40" height="24" rx="3" style="fill:var(--surface);stroke:var(--line-2)"/><text x="180" y="492" font-size="10.5" class="mono ink2" text-anchor="middle">3</text>
+        <text x="216" y="492" font-size="12" class="mut" text-anchor="middle">…</text>
+        <rect x="232" y="476" width="64" height="24" rx="3" class="vios"/><text x="264" y="492" font-size="10.5" class="mono vio" font-weight="600" text-anchor="middle">7,341</text>
+        <text x="312" y="492" font-size="12" class="mut" text-anchor="middle">…</text>
+        <rect x="328" y="476" width="48" height="24" rx="3" style="fill:var(--surface);stroke:var(--line-2)"/><text x="352" y="492" font-size="10.5" class="mono ink2" text-anchor="middle">n−1</text>
+        <text x="392" y="486" font-size="10.5" class="ink2">one flat array of numbered blocks; one LBA = one block,</text>
+        <text x="392" y="501" font-size="10.5" class="ink2">512 B or 4 KB, fixed when the drive is formatted; here 4 KB</text>
+        <text x="28" y="524" font-size="11" class="ink" font-weight="600">hard disk (page ①)</text>
+        <text x="28" y="540" font-size="10.5" class="ink2">LBA → one fixed spot: surface,</text>
+        <text x="28" y="555" font-size="10.5" class="ink2">track, sector; it never moves</text>
+        <text x="272" y="524" font-size="11" class="acc" font-weight="600">SSD (pages ② and ③)</text>
+        <text x="272" y="540" font-size="10.5" class="ink2">LBA → a physical page the FTL picks;</text>
+        <text x="272" y="555" font-size="10.5" class="ink2">it moves on every rewrite and GC</text>
+        <text x="516" y="524" font-size="11" class="vio" font-weight="600">flash cache (this page)</text>
+        <text x="516" y="540" font-size="10.5" class="ink2">picks an LBA when it writes,</text>
+        <text x="516" y="555" font-size="10.5" class="ink2">then records key → LBA in ①</text>
+        <text x="28" y="575" font-size="10.5" class="ink">One number, three readers: only the cache knows the key, and only the drive knows the chip.</text>
+        <text x="16" y="608" font-size="11.5" class="ink" font-weight="600">This page:</text>
+        <text x="96" y="608" font-size="11" class="ink2">문제 · 왜</text>
+        <a href="#s0"><rect x="152" y="595" width="44" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="174" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§0 ★</text></a>
+        <text x="210" y="608" font-size="11" class="ink2">문맥 · how a cache finds a tiny object</text>
+        <a href="#s1"><rect x="428" y="595" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="445" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§1</text></a>
+        <a href="#s2"><rect x="468" y="595" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="485" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§2</text></a>
+        <a href="#s3"><rect x="508" y="595" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="525" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§3</text></a>
+        <a href="#s4"><rect x="548" y="595" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="565" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§4</text></a>
+        <a href="#s5"><rect x="588" y="595" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="605" y="608" font-size="10" class="acc" font-weight="600" text-anchor="middle">§5</text></a>
+        <text x="96" y="634" font-size="11" class="ink2">어떤걸</text>
+        <a href="#s7"><rect x="140" y="621" width="44" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="162" y="634" font-size="10" class="acc" font-weight="600" text-anchor="middle">§7 ★</text></a>
+        <text x="196" y="634" font-size="11" class="ink2">how</text>
+        <a href="#s8"><rect x="226" y="621" width="44" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="248" y="634" font-size="10" class="acc" font-weight="600" text-anchor="middle">§8 ★</text></a>
+        <text x="282" y="634" font-size="11" class="ink2">when</text>
+        <a href="#s9"><rect x="318" y="621" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="335" y="634" font-size="10" class="acc" font-weight="600" text-anchor="middle">§9</text></a>
+        <text x="366" y="634" font-size="11" class="ink2">DRAM’s other costs</text>
+        <a href="#s6"><rect x="474" y="621" width="34" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="491" y="634" font-size="10" class="acc" font-weight="600" text-anchor="middle">§6</text></a>
+        <text x="522" y="634" font-size="11" class="mut">then page ④ and its §12</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 1. Three things on this page are called DRAM, and only one is new. The dashed frames are where each thing physically lives. ② is the FTL map of pages ② and ③: it sits in the SSD's controller, turns logical page numbers into physical pages on the chips, and is not this page's subject. The DRAM cache in the server holds the hottest objects themselves, not a map; it is asked first, then the flash cache, then the database (Kangaroo §3, CacheLib §4.2). ① is the flash cache's own map from keys to logical addresses, in the server's main memory: the SSD accepts only logical page numbers, so the cache must keep it, one entry per object. The cache's code ends at the logical address; only the FTL knows which physical page holds it. The cache can still find every object, because it chose the logical address itself when it wrote (left arrow), and the SSD promises that read(p) returns what was last written to p, wherever garbage collection moved it (right column). The panel under the SSD reviews the LBA, the number all three share: a hard disk fixes it to one spot, an SSD's FTL moves its data to a new physical page on every rewrite, and the cache picks it when it writes. The last rows map the page: the problem first (§0), then context, then what, how and when.</p>
+  </div>
+  <p class="gist why" id="must"><span class="lbl">MUST READ</span>Figure 1 is the cast: the FTL map ② was settled on page ③, and the new cost is ①, the cache's own map from keys to pages in the server's DRAM. §0 states the problem against page ③: the cache moved to flash to save DRAM, yet with ~100 B objects its map costs more DRAM than the flash it points into; §1–§5 show how a cache finds a tiny object, and §6–§9 take the cost by why, what, how and when. Read §0, §1, §7 and §8 (★ core) in full before opening any of the papers; the rest is main.</p>
+</section>
+
+<section id="s0">
+  <div class="sec-head"><span class="n">§0</span><h2>Page ③ settled the SSD's map and its garbage. What problem starts here?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-his">문제 · 왜</span></div>
+  <div class="figure" id="fig-problem">
+    <div class="scroll">
+      <svg viewBox="0 0 760 448" width="760" role="img" aria-label="A chain of six steps. One: a cache holds billions of tiny objects in front of a database. Two: holding them in DRAM is too expensive. Three: so the cache moves onto SSDs. Four: the SSD is asked only by page number. Five: so the cache keeps its own map from keys to pages in the server's DRAM. Six: with 100-byte objects that map costs more than the flash. The problem: find each object with a few bits of DRAM without multiplying flash writes">
+        <defs><marker id="h0a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12.5" class="ink" font-weight="600">Why the cache needs a second map, and why that map is the problem</text>
+        <rect x="16" y="34" width="400" height="44" rx="5" class="surf"/>
+        <circle cx="32" cy="50" r="8" style="fill:var(--surface);stroke:var(--line-2)"/><text x="32" y="54" font-size="10" class="ink" font-weight="600" text-anchor="middle">1</text>
+        <text x="48" y="54" font-size="12" class="ink" font-weight="600">A cache holds billions of tiny objects</text>
+        <text x="48" y="70" font-size="10.5" class="ink2">in front of a slow database, each asked for by key</text>
+        <text x="432" y="54" font-size="10.5" class="ink">Facebook edges &lt; 100 B · tweets &lt; 33 characters</text>
+        <text x="432" y="70" font-size="9.5" class="mono mut">Kangaroo §2.1</text>
+        <path d="M216 79 V90" class="arr" marker-end="url(#h0a)"/>
+        <rect x="16" y="92" width="400" height="44" rx="5" class="surf"/>
+        <circle cx="32" cy="108" r="8" style="fill:var(--surface);stroke:var(--line-2)"/><text x="32" y="112" font-size="10" class="ink" font-weight="600" text-anchor="middle">2</text>
+        <text x="48" y="112" font-size="12" class="ink" font-weight="600">Holding them all in DRAM is too expensive</text>
+        <text x="48" y="128" font-size="10.5" class="ink2">DRAM ≈ 10× flash per byte, and fixed per server (§6)</text>
+        <text x="432" y="112" font-size="10.5" class="ink">4.25 TB cache: $130,900 in DRAM, $12,500 on SSDs</text>
+        <text x="432" y="128" font-size="9.5" class="mono mut">Flashield §1, Table 1</text>
+        <path d="M216 137 V148" class="arr" marker-end="url(#h0a)"/>
+        <rect x="16" y="150" width="400" height="44" rx="5" class="accs"/>
+        <circle cx="32" cy="166" r="8" style="fill:var(--surface);stroke:var(--accent)"/><text x="32" y="170" font-size="10" class="acc" font-weight="600" text-anchor="middle">3</text>
+        <text x="48" y="170" font-size="12" class="ink" font-weight="600">So the cache moves onto SSDs: a flash cache</text>
+        <text x="48" y="186" font-size="10.5" class="ink2">a DRAM cache keeps the hottest &lt; 1% of the capacity</text>
+        <text x="432" y="170" font-size="10.5" class="ink">the SSD under it is the drive of pages ② and ③</text>
+        <text x="432" y="186" font-size="9.5" class="mono mut">Kangaroo §3 · CacheLib §4.2</text>
+        <path d="M216 195 V206" class="arr" marker-end="url(#h0a)"/>
+        <rect x="16" y="208" width="400" height="44" rx="5" class="surf"/>
+        <circle cx="32" cy="224" r="8" style="fill:var(--surface);stroke:var(--line-2)"/><text x="32" y="228" font-size="10" class="ink" font-weight="600" text-anchor="middle">4</text>
+        <text x="48" y="228" font-size="12" class="ink" font-weight="600">The SSD takes logical page numbers, never keys</text>
+        <text x="48" y="244" font-size="10.5" class="ink2">and only its FTL knows the physical page (② §7)</text>
+        <text x="432" y="228" font-size="10" class="mono ink">read(logical page 7,341)   ✓</text>
+        <text x="432" y="244" font-size="10" class="mono ink">read("user:42 friend:9")   ✗</text>
+        <path d="M216 253 V264" class="arr" marker-end="url(#h0a)"/>
+        <rect x="16" y="266" width="400" height="44" rx="5" class="vios"/>
+        <circle cx="32" cy="282" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="32" y="286" font-size="10" class="vio" font-weight="600" text-anchor="middle">5</text>
+        <text x="48" y="286" font-size="12" class="ink" font-weight="600">So the cache keeps its own map: key → logical page</text>
+        <text x="48" y="302" font-size="10.5" class="ink2">in the server’s DRAM, one entry per object (§1)</text>
+        <text x="432" y="286" font-size="10.5" class="ink">about 40 objects share one 4 KB page, so a</text>
+        <text x="432" y="302" font-size="10.5" class="ink">page number alone cannot name one of them</text>
+        <path d="M216 311 V322" class="arr" marker-end="url(#h0a)"/>
+        <rect x="16" y="324" width="400" height="44" rx="5" class="stps"/>
+        <circle cx="32" cy="340" r="8" style="fill:var(--surface);stroke:var(--stop)"/><text x="32" y="344" font-size="10" class="stp" font-weight="600" text-anchor="middle">6</text>
+        <text x="48" y="344" font-size="12" class="ink" font-weight="600">That map brings the DRAM cost back</text>
+        <text x="48" y="360" font-size="10.5" class="ink2">≥ 15 B per 100 B object: ≥ 15% of the data (§7)</text>
+        <text x="432" y="344" font-size="10.5" class="stp" font-weight="600">≈ 150% of the flash bill; the FTL map’s is ≈ 1%</text>
+        <text x="432" y="360" font-size="9.5" class="mono mut">§7: DRAM bill ÷ flash bill ≈ 10 × entry ÷ object</text>
+        <rect x="16" y="384" width="728" height="52" rx="6" class="vios"/>
+        <text x="28" y="405" font-size="12.5" class="vio" font-weight="600">The problem: find each object with a few bits of DRAM,</text>
+        <text x="28" y="424" font-size="11" class="ink">without multiplying the flash writes that page ③ priced. Every paper on this page answers this (§8).</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 0a. The problem as a chain. Steps ① to ③ are why a flash cache exists; ④ and ⑤ are why it needs a map that the SSD's FTL map cannot be; ⑥ is why that map is the cost. Teal is the SSD of pages ② and ③, violet the new map in the server's DRAM, red the cost. The right column is each step's evidence.</p>
+  </div>
+  <p>Page ③ closed the SSD's own books. Inside the drive, the FTL keeps a map from page numbers to chip locations, one 4-byte entry per 4 KB page: about 1 GB of controller DRAM per TB, 0.1% of the data. Garbage collection copies live pages at a cost of 1/(1−u), and overprovisioning keeps u down. Both costs belong to the drive and were kept low there. This page leaves that layer as it is and climbs to the software that uses the drive. <span class="src"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">page ③ §3</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">§5</a></span></p>
+  <p>That software is a cache. Large services put one in front of a slow database, and what it holds are billions of tiny objects: Facebook's social-graph edges average under 100 bytes, and tweets under 33 characters (Figure 0a, ①). Holding them in DRAM is fast and expensive: Flashield prices a 4.25 TB cache at $130,900 as seventeen DRAM servers and $12,500 as one server with four SSDs (②). So the cache moves onto flash, and keeps under 1% of its capacity in a DRAM cache of the hottest objects (③). <span class="src">Kangaroo §2.1, §3 · Flashield §1, Table 1 · CacheLib §4.2</span></p>
+  <p>Here the new problem starts. An SSD is a block device: it is asked to read or write logical page p, and nothing else. A read arrives with a key, and the FTL's map starts from logical page numbers, so it cannot say which page holds "user:42 friend:9" (④). The cache must answer that itself, with a map of its own from keys to places on flash, kept in the server's main memory so that finding an object costs no flash read of its own (⑤). This map is not the FTL map moved or copied: it sits above it, and every read passes through both, ① then ② in Figure 1.</p>
+  <p>The two maps have different owners, and nothing joins them into one. The cache's map ends at a logical address: the LBA of <a href="2026-10-08-storage-1-hard-disk-rebuilt.html#s3">page ① §3</a>, the number the SSD shows the outside. This page counts it in 4 KB pages; a drive formatted with 512-byte blocks numbers the same page 8 × 7,341 = 58,728, and the driver converts. Which physical page holds that address is decided by the FTL in the drive's firmware, and it changes whenever garbage collection copies the page (<a href="2026-10-08-storage-2-flash-and-ftl.html#s7">page ② §7</a>); the cache never learns it. It does not need to: the cache chose p itself when it wrote the object, so it can record key → p, and the SSD promises that read(p) returns what was last written to p, wherever the page now lies on the chips. A program using virtual addresses is in the same position: it never sees a physical address, and the MMU and the OS keep the translation. So the cache's code does three things: it keeps and searches the key-to-logical map, it chooses the logical address each new object is written to (the end of a log, or the page a hash picks), and it sends read(p) and write(p). The logical-to-physical step is not in its code. Zoned SSDs move one decision across that line: the host picks which zone, an erase unit, its data goes into, though still not the chip location, and FairyWREN and Nemo use exactly that lever (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10.2</a>, §8).</p>
+  <p>The unit makes it expensive. The FTL maps 4 KB pages; the cache maps objects about 40 times smaller, packed some 40 to a page, so its map needs one entry per object (§1). At 15 bytes per 100-byte object, the map is 15% of the data, and DRAM costs about ten times flash per byte, so the map's DRAM would cost about 150% of the flash it points into (⑥, derived in §7). The cache moved to flash to save DRAM, and its map spends the DRAM again.</p>
+  <div class="figure" id="fig-vs3">
+    <div class="scroll">
+      <svg viewBox="0 0 760 328" width="760" role="img" aria-label="A comparison of page three and this page, row by row: who keeps the map, what it is asked by, the unit it places, the cost of a map entry per unit, the cost of a fixed rule without a map, the middle way, and the rewrite cost. The trade is the same; the key, the forty times smaller unit and the multiplying write amplification are new">
+        <rect x="160" y="32" width="288" height="210" rx="5" class="accs"/>
+        <rect x="456" y="32" width="288" height="210" rx="5" class="vios"/>
+        <text x="170" y="22" font-size="12" class="acc" font-weight="600">page ③: inside the SSD</text>
+        <text x="466" y="22" font-size="12" class="vio" font-weight="600">this page: the cache above it</text>
+        <text x="16" y="54" font-size="10.5" class="ink" font-weight="600">who keeps the map</text>
+        <text x="170" y="54" font-size="10.5" class="ink">the FTL: logical → physical, in the drive</text>
+        <text x="466" y="54" font-size="10.5" class="ink">the cache: key → logical, in the server’s DRAM</text>
+        <path d="M16 62 H744" class="ln"/>
+        <text x="16" y="84" font-size="10.5" class="ink" font-weight="600">asked by</text>
+        <text x="170" y="84" font-size="10.5" class="ink">a logical page: read(page 7,341)</text>
+        <text x="466" y="84" font-size="10.5" class="stp" font-weight="600">a key: get("user:42 friend:9")</text>
+        <path d="M16 92 H744" class="ln"/>
+        <text x="16" y="114" font-size="10.5" class="ink" font-weight="600">the unit it places</text>
+        <text x="170" y="114" font-size="10.5" class="ink">a 4 KB page</text>
+        <text x="466" y="114" font-size="10.5" class="stp" font-weight="600">a ~100 B object, about 40 per page</text>
+        <path d="M16 122 H744" class="ln"/>
+        <text x="16" y="144" font-size="10.5" class="ink" font-weight="600">a map entry per unit</text>
+        <text x="170" y="144" font-size="10.5" class="ink">4 B per 4 KB: 0.1% of the data (③ §5)</text>
+        <text x="466" y="144" font-size="10.5" class="ink">≥ 15 B per 100 B: ≥ 15% (§2, §7)</text>
+        <path d="M16 152 H744" class="ln"/>
+        <text x="16" y="174" font-size="10.5" class="ink" font-weight="600">no map, a fixed rule</text>
+        <text x="170" y="174" font-size="10.5" class="ink">block map: one small write copies a block (③ §5)</text>
+        <text x="466" y="174" font-size="10.5" class="ink">sets: a 100 B insert rewrites 4 KB (§3)</text>
+        <path d="M16 182 H744" class="ln"/>
+        <text x="16" y="204" font-size="10.5" class="ink" font-weight="600">the middle way</text>
+        <text x="170" y="204" font-size="10.5" class="ink">hybrid: page-mapped log blocks (③ §6)</text>
+        <text x="466" y="204" font-size="10.5" class="ink">Kangaroo: indexed log + hashed sets (§5)</text>
+        <path d="M16 212 H744" class="ln"/>
+        <text x="16" y="234" font-size="10.5" class="ink" font-weight="600">the rewrite cost</text>
+        <text x="170" y="234" font-size="10.5" class="ink">GC copies live pages: 1/(1−u) (③ §3)</text>
+        <text x="466" y="234" font-size="10.5" class="stp" font-weight="600">the cache’s own, × the SSD’s below (§8)</text>
+        <rect x="16" y="256" width="728" height="60" rx="6" class="surf"/>
+        <text x="28" y="279" font-size="12" class="ink" font-weight="600">Same trade, one layer up: fewer map entries cost more rewrites.</text>
+        <text x="28" y="300" font-size="10.5" class="ink2">New here, in red: the key the SSD never sees, a unit 40× smaller, and two write amplifications that multiply.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 0b. Page ③ against this page, row by row. The left column is what page ③ built inside the drive; the right column is the same question asked by the cache above it. Red marks what is new on this page; the rest is page ③'s trade at a smaller unit.</p>
+  </div>
+  <p>Figure 0b sets the two layers side by side. The trade is the one page ③ already met: a map entry per small unit costs memory, and placing by a fixed rule with no map costs rewrites. Page ③'s FTL answered with a hybrid, a few page-mapped log blocks in front of block-mapped data; Kangaroo answers the cache's version with a small indexed log in front of hashed sets (§5). Three things are new. The map is keyed by the application's keys, which the SSD never sees. The unit is about 40 times smaller than a page, so a per-object map has about 40 times more entries per byte than the FTL's, and a fixed-rule placement rewrites about 40 times more bytes than it stores (§3). And the two layers stack: the cache's own rewrites go down into the SSD, whose garbage collection multiplies them again (§8). <span class="src"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">page ③ §5</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s6">§6</a></span></p>
+  <p>So the problem this page and the papers take up fits in one sentence: find each of billions of tiny objects with a few bits of DRAM, without multiplying the flash writes that page ③ priced. Kangaroo's abstract states the first half as a limit: "very few bits per cached object can be kept in DRAM without losing flash's cost advantage." §1–§5 show the designs that find an object; §6–§9 measure the cost and follow the papers that cut it. <span class="src">Kangaroo, abstract</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>Page ③'s FTL map turns page numbers into chip locations, inside the drive, at 0.1% of the data. A flash cache is asked by key and the SSD takes only logical page numbers, so the cache keeps a second map, from keys to logical pages, in the server's DRAM; only the FTL turns those into physical pages. With ~100 B objects that map needs an entry per object and would cost more DRAM than the flash it points into: the cache fled DRAM, and its map brings DRAM back. It is page ③'s trade, map size against rewrites, one layer up, with a 40× smaller unit and write amplification that multiplies across the two layers.</p>
+</section>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>Why does a flash cache need a map of its own?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-his">문맥</span></div>
+  <div class="figure" id="fig-pack">
+    <div class="scroll">
+      <svg viewBox="0 0 760 392" width="760" role="img" aria-label="Top: a 4 KB page drawn as a bar, with the papers object sizes marked near its left end: 33, 100, 300 and 700 bytes. Middle: storing one object per page wastes 97.5 percent of each page; packing about 40 objects per page fills it. Bottom: so the cache needs one map entry per object">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">① The objects the papers cache, against the 4 KB page an SSD writes</text>
+        <rect x="16" y="34" width="728" height="22" rx="3" class="surf"/>
+        <text x="652" y="49" font-size="10.5" class="mut">4,096 B page</text>
+        <rect x="16" y="36" width="124.4" height="18" class="ambs"/>
+        <path d="M140.4 54 V68 H154.4" class="ln" style="stroke:var(--amber)"/>
+        <text x="158.4140625" y="72" font-size="10.5" class="ink">700 B · all social-graph objects: under 700 B on average</text>
+        <path d="M69.3 54 V84 H154.4" class="ln" style="stroke:var(--amber)"/>
+        <text x="158.4140625" y="88" font-size="10.5" class="ink">300 B · IoT sensor metadata: about 300 B (Azure)</text>
+        <path d="M33.8 54 V100 H154.4" class="ln" style="stroke:var(--amber)"/>
+        <text x="158.4140625" y="104" font-size="10.5" class="ink">100 B · social-graph edge: under 100 B on average (Facebook)</text>
+        <path d="M21.9 54 V116 H154.4" class="ln" style="stroke:var(--amber)"/>
+        <text x="158.4140625" y="120" font-size="10.5" class="ink">33 B · average tweet: under 33 characters (Twitter)</text>
+        <text x="16" y="148" font-size="10.5" class="mut">Kangaroo §2.1: “billions of objects that are each significantly less than the 4 KB minimum write granularity”.</text>
+        <path d="M16 162 H744" class="ln"/>
+        <text x="16" y="186" font-size="12" class="ink" font-weight="600">② Two ways to store them</text>
+        <rect x="16" y="198" width="356" height="120" rx="6" class="surf"/>
+        <text x="28" y="218" font-size="12" class="ink" font-weight="600">a. one object per page</text>
+        <text x="28" y="234" font-size="10.5" class="mut">the map is one entry per page, but</text>
+        <rect x="28" y="244" width="100" height="30" class="surf" style="stroke-dasharray:3 3"/>
+        <rect x="28" y="244" width="3.4" height="30" class="ambs"/>
+        <rect x="140" y="244" width="100" height="30" class="surf" style="stroke-dasharray:3 3"/>
+        <rect x="140" y="244" width="3.4" height="30" class="ambs"/>
+        <rect x="252" y="244" width="100" height="30" class="surf" style="stroke-dasharray:3 3"/>
+        <rect x="252" y="244" width="3.4" height="30" class="ambs"/>
+        <text x="28" y="292" font-size="11" class="stp" font-weight="600">97.5% of every page is empty:</text>
+        <text x="28" y="308" font-size="11" class="ink">the same flash holds 41× fewer objects</text>
+        <rect x="388" y="198" width="356" height="120" rx="6" class="surf"/>
+        <text x="400" y="218" font-size="12" class="ink" font-weight="600">b. packed, about 40 per page</text>
+        <text x="400" y="234" font-size="10.5" class="mut">full pages, and</text>
+        <rect x="400" y="244" width="100" height="30" class="ambs"/>
+        <path d="M402.5 244V274M405.0 244V274M407.5 244V274M410.0 244V274M412.5 244V274M415.0 244V274M417.5 244V274M420.0 244V274M422.5 244V274M425.0 244V274M427.5 244V274M430.0 244V274M432.5 244V274M435.0 244V274M437.5 244V274M440.0 244V274M442.5 244V274M445.0 244V274M447.5 244V274M450.0 244V274M452.5 244V274M455.0 244V274M457.5 244V274M460.0 244V274M462.5 244V274M465.0 244V274M467.5 244V274M470.0 244V274M472.5 244V274M475.0 244V274M477.5 244V274M480.0 244V274M482.5 244V274M485.0 244V274M487.5 244V274M490.0 244V274M492.5 244V274M495.0 244V274M497.5 244V274" class="ln" style="stroke:var(--amber);stroke-width:.6"/>
+        <rect x="512" y="244" width="100" height="30" class="ambs"/>
+        <path d="M514.5 244V274M517.0 244V274M519.5 244V274M522.0 244V274M524.5 244V274M527.0 244V274M529.5 244V274M532.0 244V274M534.5 244V274M537.0 244V274M539.5 244V274M542.0 244V274M544.5 244V274M547.0 244V274M549.5 244V274M552.0 244V274M554.5 244V274M557.0 244V274M559.5 244V274M562.0 244V274M564.5 244V274M567.0 244V274M569.5 244V274M572.0 244V274M574.5 244V274M577.0 244V274M579.5 244V274M582.0 244V274M584.5 244V274M587.0 244V274M589.5 244V274M592.0 244V274M594.5 244V274M597.0 244V274M599.5 244V274M602.0 244V274M604.5 244V274M607.0 244V274M609.5 244V274" class="ln" style="stroke:var(--amber);stroke-width:.6"/>
+        <rect x="624" y="244" width="100" height="30" class="ambs"/>
+        <path d="M626.5 244V274M629.0 244V274M631.5 244V274M634.0 244V274M636.5 244V274M639.0 244V274M641.5 244V274M644.0 244V274M646.5 244V274M649.0 244V274M651.5 244V274M654.0 244V274M656.5 244V274M659.0 244V274M661.5 244V274M664.0 244V274M666.5 244V274M669.0 244V274M671.5 244V274M674.0 244V274M676.5 244V274M679.0 244V274M681.5 244V274M684.0 244V274M686.5 244V274M689.0 244V274M691.5 244V274M694.0 244V274M696.5 244V274M699.0 244V274M701.5 244V274M704.0 244V274M706.5 244V274M709.0 244V274M711.5 244V274M714.0 244V274M716.5 244V274M719.0 244V274M721.5 244V274" class="ln" style="stroke:var(--amber);stroke-width:.6"/>
+        <text x="400" y="292" font-size="11" class="vio" font-weight="600">one page now holds 40 keys,</text>
+        <text x="400" y="308" font-size="11" class="ink">and a read still arrives with one key</text>
+        <rect x="16" y="330" width="728" height="50" rx="6" class="vios"/>
+        <text x="28" y="350" font-size="12.5" class="vio" font-weight="600">③ So the cache’s map needs one entry per object, not per page.</text>
+        <text x="28" y="368" font-size="11" class="ink">A page number alone cannot say which of its 40 objects a key is, or which page a key went to.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 2. Why the map has one entry per object. ① The object sizes Kangaroo §2.1 reports, on the scale of one 4 KB page; the amber bar is 700 B. ② Giving each object its own page wastes almost all of the flash, so caches pack about 40 small objects into each page. ③ A packed page holds many keys, and a read names a key, so the map from key to place needs an entry for every object.</p>
+  </div>
+  <p>§0 and Figure 1 set the scene: a read carries a key, the SSD takes only logical page numbers, and the cache's map ① turns the one into the other. The SSD keeps its own map ② from logical to physical pages, the FTL map of <a href="2026-10-08-storage-2-flash-and-ftl.html#s7">page ② §7</a> and <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">page ③ §5</a>; this section shows why the cache's map needs an entry for every object, where the FTL's needs one per page.</p>
+  <p>How many entries it needs depends on the objects (Figure 2, ①). The papers cache tiny ones: Facebook's social-graph edges average under 100 bytes, tweets average under 33 characters, and Azure's IoT sensor metadata averages 300 bytes. Kangaroo sums it up as "billions of objects that are each significantly less than the 4 KB minimum write granularity of block-storage devices". <span class="src">Kangaroo §2.1</span></p>
+  <p>A cache could give each object a 4 KB page of its own (②a). A 100-byte object would leave 97.5% of the page empty, and the same flash would hold 41 times fewer objects. So caches pack about 40 objects into each page (②b). A packed page holds 40 keys, and a read still arrives with one key and no page number, so the map needs an entry for every object (③). The SSD's map has one entry per page; the cache's has one per object.</p>
+  <p class="gist ks"><span class="lbl">CARRY</span>The SSD is asked by logical page number, the cache by key. Objects of about 100 bytes are packed some 40 to a page, so the cache's own map, kept in the server's DRAM, needs one entry per object, not per page.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>How does a log-structured cache find an object?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문맥</span></div>
+  <div class="figure" id="fig-log">
+    <div class="scroll">
+      <svg viewBox="0 0 760 1146" width="760" role="img" aria-label="A log-structured cache, from the question to the mechanism. The question: a new 100-byte object arrives with only a key; where on flash does it go, and how is it found again. Why a log: three flash rules force a DRAM buffer, an append-only log and an index row per object. Which log: the same append-only idea as the FTL's log on page two, one layer up, compared row by row; writes stay cheap and eviction copies nothing, but DRAM grows from 0.1 percent to at least 15 percent of the data, which is the problem of section 0. How it runs: one object traced through insert, buffer full, lookup and flash full">
+        <defs><marker id="h3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+
+                <rect x="16" y="6" width="728" height="50" rx="8" class="ambs"/>
+        <text x="30" y="24" font-size="10" class="amb" font-weight="600" letter-spacing="1.5">THE QUESTION</text>
+        <text x="30" y="45" font-size="12.5" class="ink" font-weight="600">A new 100-byte object arrives with only a key. Where on flash does it go, and how is it found again?</text>
+
+                <g transform="translate(0,66)">
+          <text x="16" y="14" font-size="10" class="mut" font-weight="600" letter-spacing="1.5">WHY A LOG · three rules from pages ② and ③</text>
+          <rect x="16" y="24" width="232" height="80" rx="6" class="surf"/>
+          <text x="26" y="44" font-size="11" class="ink" font-weight="600">a. smallest write: one 4 KB page</text>
+          <text x="26" y="62" font-size="10.5" class="ink2">a 100 B object written alone</text>
+          <text x="26" y="77" font-size="10.5" class="ink2">uses 2.5% of the page it costs</text>
+          <text x="26" y="94" font-size="10" class="mut">§1, Figure 2</text>
+          <rect x="264" y="24" width="232" height="80" rx="6" class="surf"/>
+          <text x="274" y="44" font-size="11" class="ink" font-weight="600">b. no overwrite in place</text>
+          <text x="274" y="62" font-size="10.5" class="ink2">a page is written again only after</text>
+          <text x="274" y="77" font-size="10.5" class="ink2">its whole block is erased</text>
+          <text x="274" y="94" font-size="10" class="mut">page ②</text>
+          <rect x="512" y="24" width="232" height="80" rx="6" class="surf"/>
+          <text x="522" y="44" font-size="11" class="ink" font-weight="600">c. flash wants big in-order writes</text>
+          <text x="522" y="62" font-size="10.5" class="ink2">small scattered writes raise</text>
+          <text x="522" y="77" font-size="10.5" class="ink2">GC's copying: WA</text>
+          <text x="522" y="94" font-size="10" class="mut">page ③ §4</text>
+          <rect x="16" y="114" width="728" height="62" rx="6" class="surf"/>
+          <text x="28" y="133" font-size="11" class="ink">So the cache <tspan class="amb" font-weight="600">collects new objects in a DRAM buffer</tspan> (a), and writes each full buffer</text>
+          <text x="28" y="150" font-size="11" class="ink"><tspan class="amb" font-weight="600">at the end of a log, never over old data</tspan> (b, c). An object can then be anywhere, so its place cannot be</text>
+          <text x="28" y="167" font-size="11" class="ink">computed from the key; the cache <tspan class="vio" font-weight="600">writes it down: one index row per object, in DRAM</tspan>.</text>
+        </g>
+
+                <g transform="translate(0,256)">
+          <text x="16" y="14" font-size="10" class="mut" font-weight="600" letter-spacing="1.5">WHICH LOG · the one page ② §7 built, one layer up</text>
+          <text x="16" y="34" font-size="12" class="ink" font-weight="600">"Log" here is not a file of messages. It is a way of placing data: append at the end, never write over.</text>
+          <text x="16" y="52" font-size="11" class="ink2">The FTL of page ② §7 did this with 4 KB pages, inside the SSD. This cache does it with 100-byte objects,</text>
+          <text x="16" y="68" font-size="11" class="ink2">in the server, on top of the SSD. Same move, different unit, different owner.</text>
+          <rect x="176" y="80" width="280" height="24" rx="4" class="accs"/>
+          <text x="186" y="96" font-size="11" class="acc" font-weight="600">the FTL's log (page ② §7)</text>
+          <rect x="464" y="80" width="280" height="24" rx="4" class="vios"/>
+          <text x="474" y="96" font-size="11" class="vio" font-weight="600">this cache's log (§2)</text>
+          <line x1="16" y1="108" x2="744" y2="108" class="ln"/>
+          <text x="24" y="124" font-size="10.5" class="ink2">who runs it</text>
+          <text x="186" y="124" font-size="10.5" class="ink">the SSD controller</text>
+          <text x="474" y="124" font-size="10.5" class="ink">the cache software, in the server</text>
+          <line x1="16" y1="134" x2="744" y2="134" class="ln"/>
+          <text x="24" y="150" font-size="10.5" class="ink2">what it appends</text>
+          <text x="186" y="150" font-size="10.5" class="ink">one 4 KB page</text>
+          <text x="474" y="150" font-size="10.5" class="ink">one ~100 B object, ~40 packed per page</text>
+          <line x1="16" y1="160" x2="744" y2="160" class="ln"/>
+          <text x="24" y="176" font-size="10.5" class="ink2">the log lies on</text>
+          <text x="186" y="176" font-size="10.5" class="ink">physical flash pages</text>
+          <text x="474" y="176" font-size="10.5" class="ink">logical pages the SSD exposes</text>
+          <line x1="16" y1="186" x2="744" y2="186" class="ln"/>
+          <text x="24" y="202" font-size="10.5" class="ink2">its map</text>
+          <text x="186" y="202" font-size="10.5" class="mono ink">logical page → physical page</text>
+          <text x="186" y="217" font-size="10.5" class="ink2">one entry per 4 KB page, controller DRAM</text>
+          <text x="474" y="202" font-size="10.5" class="mono ink">key → segment, byte</text>
+          <text x="474" y="217" font-size="10.5" class="ink2">one row per 100 B object, server DRAM</text>
+          <line x1="16" y1="226" x2="744" y2="226" class="ln"/>
+          <text x="24" y="242" font-size="10.5" class="ink2">when space runs out</text>
+          <text x="186" y="242" font-size="10.5" class="ink">GC copies live pages, then erases</text>
+          <text x="186" y="257" font-size="10.5" class="ink2">the copies are WA (page ③)</text>
+          <text x="474" y="242" font-size="10.5" class="ink">drop the oldest segment whole</text>
+          <text x="474" y="257" font-size="10.5" class="ink2">nothing copied: a cache may forget</text>
+          <line x1="16" y1="266" x2="744" y2="266" class="ln"/>
+          <text x="16" y="290" font-size="11.5" class="ink" font-weight="600">What moving up one layer changed</text>
+          <rect x="16" y="300" width="232" height="62" rx="6" class="accs"/>
+          <text x="26" y="319" font-size="11" class="acc" font-weight="600">writes: still good</text>
+          <text x="26" y="336" font-size="10.5" class="ink2">objects packed, each written once,</text>
+          <text x="26" y="351" font-size="10.5" class="ink2">in big in-order runs (a, b, c)</text>
+          <rect x="264" y="300" width="232" height="62" rx="6" class="accs"/>
+          <text x="274" y="319" font-size="11" class="acc" font-weight="600">eviction replaces GC</text>
+          <text x="274" y="336" font-size="10.5" class="ink2">the oldest segment is dropped, not</text>
+          <text x="274" y="351" font-size="10.5" class="ink2">cleaned: page ③ §10 ②, u = 0</text>
+          <rect x="512" y="300" width="232" height="62" rx="6" class="stps"/>
+          <text x="522" y="319" font-size="11" class="stp" font-weight="600">DRAM: 150× worse</text>
+          <text x="522" y="336" font-size="10.5" class="ink2">a row per 100 B object, not per</text>
+          <text x="522" y="351" font-size="10.5" class="ink2">4 KB page: 0.1% → ≥ 15% (§7)</text>
+          <text x="16" y="384" font-size="11.5" class="stp" font-weight="600">So this is not the fix. It is the plain design whose map is §0's ≥ 15% problem; §3–§8 are the ways out.</text>
+          <text x="16" y="402" font-size="10.5" class="mut">Two logs are stacked: the cache's segments reach the SSD as large in-order writes, and the FTL's own log still runs under them.</text>
+        </g>
+
+                <g transform="translate(0,672)">
+          <text x="16" y="14" font-size="10" class="mut" font-weight="600" letter-spacing="1.5">HOW IT RUNS · one object traced: user:42 friend:9</text>
+          <rect x="16" y="26" width="300" height="290" rx="6" class="surf"/>
+          <text x="28" y="46" font-size="11.5" class="mut" font-weight="600">server DRAM</text>
+          <text x="28" y="68" font-size="11" class="amb" font-weight="600">buffer = the segment being filled</text>
+          <rect x="28" y="76" width="24" height="22" class="ambs"/>
+          <rect x="54" y="76" width="24" height="22" class="ambs"/>
+          <rect x="80" y="76" width="24" height="22" class="ambs"/>
+          <rect x="106" y="76" width="24" height="22" class="ambs"/>
+          <rect x="132" y="76" width="24" height="22" class="ambs"/>
+          <rect x="158" y="76" width="24" height="22" class="ambs" style="stroke-width:2.2"/>
+          <rect x="184" y="76" width="24" height="22" class="surf"/>
+          <rect x="210" y="76" width="24" height="22" class="surf"/>
+          <rect x="236" y="76" width="24" height="22" class="surf"/>
+          <text x="40" y="91" font-size="10.5" class="ink" text-anchor="middle">A</text>
+          <text x="66" y="91" font-size="10.5" class="ink" text-anchor="middle">B</text>
+          <text x="92" y="91" font-size="10.5" class="ink" text-anchor="middle">C</text>
+          <text x="118" y="91" font-size="10.5" class="ink" text-anchor="middle">D</text>
+          <text x="144" y="91" font-size="10.5" class="ink" text-anchor="middle">E</text>
+          <text x="170" y="91" font-size="10.5" class="ink" font-weight="600" text-anchor="middle">u42</text>
+          <circle cx="284" cy="87" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="284" y="91" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+          <text x="28" y="118" font-size="10" class="mut">why: one 100 B object alone would cost a 4 KB</text>
+          <text x="28" y="132" font-size="10" class="mut">page (a); packed, ~40 share a page, one write</text>
+          <text x="28" y="160" font-size="11" class="vio" font-weight="600">index: one row per object</text>
+          <rect x="28" y="168" width="276" height="19" class="vios" style="stroke-width:2.2"/>
+          <text x="34" y="182" font-size="10" class="mono ink" font-weight="600">user:42 friend:9</text>
+          <text x="150" y="182" font-size="10" class="mono ink" font-weight="600">→ seg 7, byte 1,200</text>
+          <rect x="28" y="190" width="276" height="19" class="vios"/>
+          <text x="34" y="204" font-size="10" class="mono ink">user:7 friend:3</text>
+          <text x="150" y="204" font-size="10" class="mono ink">→ seg 5, byte 300</text>
+          <rect x="28" y="212" width="276" height="19" class="vios"/>
+          <text x="34" y="226" font-size="10" class="mono ink">user:9 friend:42</text>
+          <text x="150" y="226" font-size="10" class="mono ink">→ seg 0, byte 3,700</text>
+          <text x="34" y="248" font-size="10.5" class="mut">… a row for every object: billions of rows</text>
+          <text x="28" y="272" font-size="10" class="mut">why: in a log an object can be anywhere, so its</text>
+          <text x="28" y="286" font-size="10" class="mut">place is written down, not computed (Fig. 2 ③)</text>
+          <text x="28" y="304" font-size="10" class="mut">A real row keeps a hash tag and pointers, not the key.</text>
+
+          <rect x="332" y="26" width="412" height="290" rx="6" class="surf"/>
+          <text x="344" y="46" font-size="11.5" class="mut" font-weight="600">flash: a circular log of segments</text>
+          <text x="344" y="63" font-size="10" class="mut">segment = many pages, written whole, in order</text>
+          <path d="M296 87 C 318 87, 322 78, 340 78 L 696 78 C 702 78, 704 82, 704 94" class="arr" marker-end="url(#h3a)"/>
+          <circle cx="470" cy="78" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="470" y="82" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+          <text x="482" y="93" font-size="10" class="ink2">the full buffer lands at the next segment</text>
+          <rect x="344" y="98" width="44" height="40" class="ambs"/>
+          <rect x="392" y="98" width="44" height="40" class="ambs"/>
+          <rect x="440" y="98" width="44" height="40" class="ambs"/>
+          <rect x="488" y="98" width="44" height="40" class="ambs"/>
+          <rect x="536" y="98" width="44" height="40" class="ambs"/>
+          <rect x="584" y="98" width="44" height="40" class="ambs"/>
+          <rect x="632" y="98" width="44" height="40" class="ambs"/>
+          <rect x="680" y="98" width="44" height="40" class="surf" style="stroke:var(--accent);stroke-dasharray:4 3"/>
+          <text x="366" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 0</text>
+          <text x="414" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 1</text>
+          <text x="462" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 2</text>
+          <text x="510" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 3</text>
+          <text x="558" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 4</text>
+          <text x="606" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 5</text>
+          <text x="654" y="122" font-size="9.5" class="mono mut" text-anchor="middle">seg 6</text>
+          <text x="702" y="115" font-size="9.5" class="mono mut" text-anchor="middle">seg 7</text>
+          <text x="702" y="129" font-size="9.5" class="acc" font-weight="600" text-anchor="middle">next</text>
+          <text x="344" y="160" font-size="10.5" class="stp" font-weight="600">oldest</text>
+          <circle cx="394" cy="156" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="394" y="160" font-size="10" class="vio" font-weight="600" text-anchor="middle">4</text>
+          <path d="M304 178 C 430 260, 680 250, 702 146" class="arr-a" marker-end="url(#h3a)"/>
+          <circle cx="470" cy="256" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="470" y="260" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+          <text x="482" y="260" font-size="10.5" class="acc">later: read that one place</text>
+          <text x="344" y="300" font-size="10.5" class="ink2">Each segment is written whole, in order; the log wraps around.</text>
+
+          <circle cx="28" cy="338" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="342" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+          <text x="42" y="342" font-size="11" class="ink">insert: user:42 friend:9 goes into the buffer; its row already names where the buffer will land</text>
+          <circle cx="28" cy="360" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="364" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+          <text x="42" y="364" font-size="11" class="ink">buffer full: the whole buffer is written as seg 7, at the end of the log, in one large in-order write</text>
+          <circle cx="28" cy="382" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="386" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+          <text x="42" y="386" font-size="11" class="ink">lookup: get(user:42 friend:9) finds its row, then reads seg 7 at byte 1,200: one flash read</text>
+          <circle cx="28" cy="404" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="408" font-size="10" class="vio" font-weight="600" text-anchor="middle">4</text>
+          <text x="42" y="408" font-size="11" class="ink">flash full: seg 0, the oldest, is dropped whole; its objects leave the cache, and rows like user:9 friend:42 go too</text>
+          <rect x="16" y="424" width="356" height="46" rx="6" class="accs"/>
+          <text x="28" y="443" font-size="11.5" class="acc" font-weight="600">writes: cheap</text>
+          <text x="28" y="460" font-size="11" class="ink2">each object written once, in large in-order writes</text>
+          <rect x="388" y="424" width="356" height="46" rx="6" class="stps"/>
+          <text x="400" y="443" font-size="11.5" class="stp" font-weight="600">DRAM: one row per object = §0's map</text>
+          <text x="400" y="460" font-size="11" class="ink2">≥ 15 B per 100 B object: ≥ 15% of the data (§7)</text>
+        </g>
+      </svg>
+    </div>
+    <p class="cap">Figure 3. A log-structured cache, from the question to the mechanism. The top band is the question. WHY A LOG: three flash rules from pages ② and ③ force three parts, a buffer, a log and an index. WHICH LOG: the same append-only idea as the FTL's log on page ② §7, one layer up, compared row by row; the three boxes are what changed, and the red one is §0's problem. HOW IT RUNS: one object traced through ① insert, ② buffer full, ③ lookup and ④ flash full. Keys and places are made up for the drawing.</p>
+  </div>
+  <p><b>The question.</b> A new object of about 100 bytes arrives with only a key. Where on flash should it go, and how is it found again? Three rules from earlier pages decide it (Figure 3, WHY A LOG). a. Flash writes no less than a 4 KB page, so a 100-byte object written alone costs a whole page (<a href="#s1">§1</a>, Figure 2). b. A page cannot be written over in place; its whole block must be erased first (<a href="2026-10-08-storage-2-flash-and-ftl.html">page ②</a>). c. Flash wants large, in-order writes; small scattered ones raise garbage collection's copying (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">page ③ §4</a>). So the cache collects new objects in a <b>buffer</b> in DRAM (a), and writes each full buffer at the end of a <b>log</b>, never over old data (b, c). Once an object can be anywhere in the log, its place cannot be computed from the key, so the cache writes it down: one <b>row</b> per object, in an index in DRAM. That row is the entry per object of <a href="#s1">§1</a>'s Figure 2, ③.</p>
+  <p><b>Which log.</b> "Log" here is not a file of messages. It is a way of placing data: append at the end, never write over. It is the idea <a href="2026-10-08-storage-2-flash-and-ftl.html#s7">page ② §7</a> called logging, used one layer up (Figure 3, WHICH LOG). The FTL appends 4 KB pages onto physical flash and keeps one map entry per page in the controller's DRAM. This cache appends 100-byte objects onto the logical pages the SSD exposes, and keeps one row per object in the server's DRAM. The two logs are stacked: the cache's segments reach the SSD as large in-order writes, and the FTL's own log still runs under them.</p>
+  <p><b>What moving up changed.</b> Writes stay good: objects are packed and each is written once, in large runs. Eviction replaces garbage collection: a cache may forget, so when space runs out the oldest segment is simply dropped and nothing is copied, which is <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10</a>'s panel ②, u = 0. DRAM gets worse: a row per 100-byte object instead of an entry per 4 KB page takes the map from 0.1% of the data to at least 15% (<a href="#s7">§7</a>). So this design is not the fix. It is the plain design whose map is <a href="#s0">§0</a>'s problem, and §3–§8 are the ways out.</p>
+  <p><b>One object, traced.</b> The bottom of Figure 3 runs user:42 friend:9. It goes into the buffer, and its row already names where the buffer will land: seg 7, byte 1,200 (①). When the buffer is full, it is written as seg 7 at the end of the log in one large write (②). A later get finds the row and reads that one place (③); before ②, the buffer itself answers. When the flash is full, the oldest segment, seg 0, is dropped whole, and the rows of its objects go with it (④); <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12</a> sets this beside LFS's cleaning.</p>
+  <p>Flashield is built this way, and so is CacheLib's cache for objects of 2 KB and up, which writes regions in order and keeps every object's place in a DRAM index. A plain row, with a short hash tag in place of the key and pointers for the table and for eviction, takes over 15 bytes; Flashield squeezes it to about 30 bits, still about 37% of the flash bill (<a href="#s7">§7</a>). <span class="src">Kangaroo §2.3 and §4.2 · Nemo §2.3 · CacheLib §4.2 · Flashield §1</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A log-structured cache is the FTL's logging moved up to objects: writes stay cheap and eviction copies nothing, but the map needs a DRAM row per 100-byte object, at least 15% of the data. It is the design that has §0's problem, not its fix.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>How does a set-associative cache find an object without a map?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문맥</span></div>
+  <div class="figure" id="fig-sets">
+    <div class="scroll">
+      <svg viewBox="0 0 760 358" width="760" role="img" aria-label="A set-associative cache hashes a key to a set number, which names one 4 KB flash page holding about 40 objects. Unlike a log, where an object may go anywhere and needs a row in a map, an object here may go only into its own set, so no map is kept. A lookup reads that one page; an insert reads the page, adds the object and writes the whole page back">
+        <defs><marker id="h4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">A set-associative cache: compute the place from the key, keep no map</text>
+        <rect x="16" y="34" width="220" height="54" rx="6" class="surf"/>
+        <text x="28" y="56" font-size="11" class="mono ink">key "user:42 friend:9"</text>
+        <text x="28" y="76" font-size="10.5" class="mono mut">hash(key) mod number of sets</text>
+        <path d="M236 61 H262" class="arr" marker-end="url(#h4a)"/>
+        <rect x="264" y="34" width="150" height="54" rx="6" class="vios"/>
+        <text x="276" y="56" font-size="12" class="vio" font-weight="600">set 7,341</text>
+        <text x="276" y="76" font-size="10.5" class="ink2">computed, not looked up</text>
+        <path d="M414 61 H440" class="arr" marker-end="url(#h4a)"/>
+        <rect x="442" y="34" width="302" height="54" rx="6" class="surf"/>
+        <rect x="454" y="44" width="6" height="34" class="ambs"/>
+        <rect x="461" y="44" width="6" height="34" class="ambs"/>
+        <rect x="468" y="44" width="6" height="34" class="ambs"/>
+        <rect x="475" y="44" width="6" height="34" class="ambs"/>
+        <rect x="482" y="44" width="6" height="34" class="ambs"/>
+        <rect x="489" y="44" width="6" height="34" class="ambs"/>
+        <rect x="496" y="44" width="6" height="34" class="ambs"/>
+        <rect x="503" y="44" width="6" height="34" class="ambs"/>
+        <rect x="510" y="44" width="6" height="34" class="ambs"/>
+        <rect x="517" y="44" width="6" height="34" class="ambs"/>
+        <rect x="524" y="44" width="6" height="34" class="ambs"/>
+        <rect x="531" y="44" width="6" height="34" class="ambs"/>
+        <rect x="538" y="44" width="6" height="34" class="ambs"/>
+        <rect x="545" y="44" width="6" height="34" class="ambs"/>
+        <rect x="552" y="44" width="6" height="34" class="ambs"/>
+        <rect x="559" y="44" width="6" height="34" class="ambs"/>
+        <rect x="566" y="44" width="6" height="34" class="ambs"/>
+        <rect x="573" y="44" width="6" height="34" class="ambs"/>
+        <rect x="580" y="44" width="6" height="34" class="ambs"/>
+        <rect x="587" y="44" width="6" height="34" class="ambs"/>
+        <rect x="594" y="44" width="6" height="34" class="ambs"/>
+        <rect x="601" y="44" width="6" height="34" class="ambs"/>
+        <rect x="608" y="44" width="6" height="34" class="ambs"/>
+        <rect x="615" y="44" width="6" height="34" class="ambs"/>
+        <rect x="622" y="44" width="6" height="34" class="ambs"/>
+        <rect x="629" y="44" width="6" height="34" class="ambs"/>
+        <rect x="636" y="44" width="6" height="34" class="ambs"/>
+        <rect x="643" y="44" width="6" height="34" class="ambs"/>
+        <rect x="650" y="44" width="6" height="34" class="ambs"/>
+        <rect x="657" y="44" width="6" height="34" class="ambs"/>
+        <rect x="664" y="44" width="6" height="34" class="ambs"/>
+        <rect x="671" y="44" width="6" height="34" class="ambs"/>
+        <rect x="678" y="44" width="6" height="34" class="ambs"/>
+        <rect x="685" y="44" width="6" height="34" class="ambs"/>
+        <rect x="692" y="44" width="6" height="34" class="ambs"/>
+        <rect x="699" y="44" width="6" height="34" class="ambs"/>
+        <rect x="706" y="44" width="6" height="34" class="ambs"/>
+        <rect x="713" y="44" width="6" height="34" class="ambs"/>
+        <rect x="720" y="44" width="6" height="34" class="ambs"/>
+        <rect x="727" y="44" width="6" height="34" class="ambs"/>
+        <text x="454" y="100" font-size="10.5" class="ink">flash page 7,341: one 4 KB set, about 40 objects</text>
+        <rect x="16" y="114" width="356" height="54" rx="6" class="surf"/>
+        <text x="28" y="134" font-size="11.5" class="ink" font-weight="600">a log (§2): an object may go anywhere</text>
+        <text x="28" y="154" font-size="11" class="ink2">so the cache must remember where: a row per object</text>
+        <rect x="388" y="114" width="356" height="54" rx="6" class="vios"/>
+        <text x="400" y="134" font-size="11.5" class="vio" font-weight="600">sets: an object may go only into its own set</text>
+        <text x="400" y="154" font-size="11" class="ink2">so the cache can work out where: no rows at all</text>
+        <text x="16" y="194" font-size="12" class="ink" font-weight="600">lookup</text>
+        <text x="388" y="194" font-size="12" class="ink" font-weight="600">insert one 100 B object</text>
+        <circle cx="28" cy="210" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="214" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="42" y="214" font-size="11" class="ink">hash the key to its set</text>
+        <circle cx="28" cy="232" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="236" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="42" y="236" font-size="11" class="ink">read that one 4 KB page</text>
+        <circle cx="28" cy="254" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="28" y="258" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="42" y="258" font-size="11" class="ink">scan its ~40 objects for the key</text>
+        <circle cx="400" cy="210" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="400" y="214" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="414" y="214" font-size="11" class="ink">hash the key to its set; read the page</text>
+        <circle cx="400" cy="232" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="400" y="236" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="414" y="236" font-size="11" class="ink">add the object; if the page is full, drop the oldest</text>
+        <circle cx="400" cy="254" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="400" y="258" font-size="10" class="vio" font-weight="600" text-anchor="middle">3</text>
+        <text x="414" y="258" font-size="11" class="ink">write the whole 4 KB page back</text>
+        <rect x="16" y="282" width="356" height="44" rx="6" class="accs"/>
+        <text x="28" y="300" font-size="11.5" class="acc" font-weight="600">DRAM: almost nothing</text>
+        <text x="28" y="316" font-size="11" class="ink2">no map; small filters, about 3 bits per object (§4)</text>
+        <rect x="388" y="282" width="356" height="44" rx="6" class="stps"/>
+        <text x="400" y="300" font-size="11.5" class="stp" font-weight="600">writes: 4 KB for every 100 B</text>
+        <text x="400" y="316" font-size="11" class="ink2">about 40× the object, at random pages</text>
+        <text x="16" y="346" font-size="10.5" class="mut">A lookup for a key that is not cached still reads a page and finds nothing; §4’s filter skips most of those reads.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 4. A set-associative cache. Top: the key's hash names the set, and the set is one 4 KB page, so no map is needed. Middle: the rule that makes this work, against Figure 3: an object may live only in its own set. Lookup ①–③ reads one page. Insert ①–③ rewrites a whole 4 KB page for one small object. The bottom boxes are Figure 3's trade, reversed.</p>
+  </div>
+  <p><b>The idea.</b> Do not remember where an object is; compute it. The flash is split into many small sets, each one 4 KB page, and a hash of the key picks the set. An object may live only in its own set, so the key alone says which page to read, and no row per object is needed (Figure 4, top).</p>
+  <p>The middle row of Figure 4 puts this rule against §2's. A log lets an object go anywhere, so the cache must remember where; sets let it go to one page only, so the cache can work out where. The ZNS paper calls the SSD's own page map "fully-associative" for the same reason: any page may go anywhere, so every page needs an entry (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10.2</a>). It is the trade of <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">page ③ §5</a>'s block mapping, one layer up: there, a page's place inside its block was computed, so the map shrank to one entry per block, and rewriting one page moved the whole block. Here the map shrinks to nothing, and adding one object rewrites the whole page.</p>
+  <p>A lookup hashes the key to its set, reads that one 4 KB page, and scans its 40 or so objects for the key (lookup ①–③). An insert reads the page, adds the object, dropping the oldest one if the page is full, and writes the whole page back (insert ①–③).</p>
+  <p>So the trade is §2's, reversed. DRAM is almost free: no rows, only a small filter per set (§4), about 3 bits per object in all. Writes are dear: one 100-byte object costs a 4 KB write, about 40 times its size, and the writes land on scattered pages, so whole blocks seldom empty out together (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">page ③ §4</a>) and the SSD's own garbage collection copies more. CacheLib's cache for objects under 2 KB is built this way. <span class="src">Kangaroo §2.3 · CacheLib §4.2</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A set-associative cache lets each object live only in the one page its key hashes to, so the place is computed and no map is kept; but adding one small object rewrites that whole 4 KB page, about 40 times the object.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>What is the Bloom filter in each set for?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문맥</span></div>
+  <div class="figure" id="fig-bloom">
+    <div class="scroll">
+      <svg viewBox="0 0 760 336" width="760" role="img" aria-label="A row of 64 bits, sixteen of them set to 1. A lookup for one key checks four bit positions; all four are 1, so the answer is maybe and the page is read. A lookup for another key finds a 0 at one of its positions, so the answer is certainly not here and no flash read happens">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">One set’s filter: 64 bits (8 bytes) in DRAM. Each key in the set turns on 4 of them.</text>
+        <text x="16" y="44" font-size="10.5" class="mut">the filter of set 7,341: the keys of the objects now in its page turned on the violet bits</text>
+        <rect x="16.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="21.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="27.4" y="52" width="10.4" height="22" class="surf"/>
+        <text x="32.6" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="38.8" y="52" width="10.4" height="22" class="vios"/>
+        <text x="43.9" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="50.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="55.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="61.5" y="52" width="10.4" height="22" class="surf"/>
+        <text x="66.7" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="72.9" y="52" width="10.4" height="22" class="vios"/>
+        <text x="78.1" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="84.2" y="52" width="10.4" height="22" class="surf"/>
+        <text x="89.4" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="95.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="100.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="107.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="112.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="118.4" y="52" width="10.4" height="22" class="vios"/>
+        <text x="123.6" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="129.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="134.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="141.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="146.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="152.5" y="52" width="10.4" height="22" class="surf"/>
+        <text x="157.7" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="163.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="169.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="175.2" y="52" width="10.4" height="22" class="vios"/>
+        <text x="180.4" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="186.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="191.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="198.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="203.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="209.4" y="52" width="10.4" height="22" class="vios"/>
+        <text x="214.6" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="220.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="225.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="232.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="237.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="243.5" y="52" width="10.4" height="22" class="surf"/>
+        <text x="248.7" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="254.9" y="52" width="10.4" height="22" class="vios"/>
+        <text x="260.1" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="266.2" y="52" width="10.4" height="22" class="surf"/>
+        <text x="271.4" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="277.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="282.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="289.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="294.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="300.4" y="52" width="10.4" height="22" class="surf"/>
+        <text x="305.6" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="311.8" y="52" width="10.4" height="22" class="vios"/>
+        <text x="316.9" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="323.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="328.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="334.5" y="52" width="10.4" height="22" class="surf"/>
+        <text x="339.7" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="345.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="351.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="357.2" y="52" width="10.4" height="22" class="vios"/>
+        <text x="362.4" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="368.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="373.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="380.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="385.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="391.4" y="52" width="10.4" height="22" class="vios"/>
+        <text x="396.6" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="402.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="407.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="414.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="419.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="425.5" y="52" width="10.4" height="22" class="surf"/>
+        <text x="430.7" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="436.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="442.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="448.2" y="52" width="10.4" height="22" class="vios"/>
+        <text x="453.4" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="459.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="464.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="471.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="476.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="482.4" y="52" width="10.4" height="22" class="vios"/>
+        <text x="487.6" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="493.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="498.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="505.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="510.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="516.5" y="52" width="10.4" height="22" class="vios"/>
+        <text x="521.7" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="527.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="533.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="539.2" y="52" width="10.4" height="22" class="surf"/>
+        <text x="544.4" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="550.6" y="52" width="10.4" height="22" class="vios"/>
+        <text x="555.8" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="562.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="567.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="573.4" y="52" width="10.4" height="22" class="surf"/>
+        <text x="578.6" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="584.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="589.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="596.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="601.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="607.5" y="52" width="10.4" height="22" class="vios"/>
+        <text x="612.7" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="618.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="624.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="630.2" y="52" width="10.4" height="22" class="surf"/>
+        <text x="635.4" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="641.6" y="52" width="10.4" height="22" class="vios"/>
+        <text x="646.8" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="653.0" y="52" width="10.4" height="22" class="surf"/>
+        <text x="658.2" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="664.4" y="52" width="10.4" height="22" class="surf"/>
+        <text x="669.6" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="675.8" y="52" width="10.4" height="22" class="surf"/>
+        <text x="680.9" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="687.1" y="52" width="10.4" height="22" class="surf"/>
+        <text x="692.3" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="698.5" y="52" width="10.4" height="22" class="vios"/>
+        <text x="703.7" y="67" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="709.9" y="52" width="10.4" height="22" class="surf"/>
+        <text x="715.1" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="721.2" y="52" width="10.4" height="22" class="surf"/>
+        <text x="726.4" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="732.6" y="52" width="10.4" height="22" class="surf"/>
+        <text x="737.8" y="67" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <text x="16" y="104" font-size="11" class="ink" font-weight="600">lookup "user:42 friend:9": its 4 positions are bits 5, 21, 38 and 55</text>
+        <rect x="16.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="21.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="27.4" y="112" width="10.4" height="22" class="surf"/>
+        <text x="32.6" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="38.8" y="112" width="10.4" height="22" class="vios"/>
+        <text x="43.9" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="50.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="55.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="61.5" y="112" width="10.4" height="22" class="surf"/>
+        <text x="66.7" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="72.9" y="112" width="10.4" height="22" class="vios"/>
+        <text x="78.1" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="84.2" y="112" width="10.4" height="22" class="surf"/>
+        <text x="89.4" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="95.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="100.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="107.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="112.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="118.4" y="112" width="10.4" height="22" class="vios"/>
+        <text x="123.6" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="129.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="134.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="141.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="146.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="152.5" y="112" width="10.4" height="22" class="surf"/>
+        <text x="157.7" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="163.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="169.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="175.2" y="112" width="10.4" height="22" class="vios"/>
+        <text x="180.4" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="186.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="191.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="198.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="203.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="209.4" y="112" width="10.4" height="22" class="vios"/>
+        <text x="214.6" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="220.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="225.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="232.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="237.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="243.5" y="112" width="10.4" height="22" class="surf"/>
+        <text x="248.7" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="254.9" y="112" width="10.4" height="22" class="vios"/>
+        <text x="260.1" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="266.2" y="112" width="10.4" height="22" class="surf"/>
+        <text x="271.4" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="277.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="282.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="289.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="294.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="300.4" y="112" width="10.4" height="22" class="surf"/>
+        <text x="305.6" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="311.8" y="112" width="10.4" height="22" class="vios"/>
+        <text x="316.9" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="323.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="328.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="334.5" y="112" width="10.4" height="22" class="surf"/>
+        <text x="339.7" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="345.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="351.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="357.2" y="112" width="10.4" height="22" class="vios"/>
+        <text x="362.4" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="368.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="373.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="380.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="385.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="391.4" y="112" width="10.4" height="22" class="vios"/>
+        <text x="396.6" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="402.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="407.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="414.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="419.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="425.5" y="112" width="10.4" height="22" class="surf"/>
+        <text x="430.7" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="436.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="442.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="448.2" y="112" width="10.4" height="22" class="vios"/>
+        <text x="453.4" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="459.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="464.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="471.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="476.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="482.4" y="112" width="10.4" height="22" class="vios"/>
+        <text x="487.6" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="493.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="498.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="505.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="510.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="516.5" y="112" width="10.4" height="22" class="vios"/>
+        <text x="521.7" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="527.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="533.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="539.2" y="112" width="10.4" height="22" class="surf"/>
+        <text x="544.4" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="550.6" y="112" width="10.4" height="22" class="vios"/>
+        <text x="555.8" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="562.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="567.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="573.4" y="112" width="10.4" height="22" class="surf"/>
+        <text x="578.6" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="584.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="589.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="596.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="601.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="607.5" y="112" width="10.4" height="22" class="vios"/>
+        <text x="612.7" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="618.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="624.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="630.2" y="112" width="10.4" height="22" class="surf"/>
+        <text x="635.4" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="641.6" y="112" width="10.4" height="22" class="vios"/>
+        <text x="646.8" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="653.0" y="112" width="10.4" height="22" class="surf"/>
+        <text x="658.2" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="664.4" y="112" width="10.4" height="22" class="surf"/>
+        <text x="669.6" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="675.8" y="112" width="10.4" height="22" class="surf"/>
+        <text x="680.9" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="687.1" y="112" width="10.4" height="22" class="surf"/>
+        <text x="692.3" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="698.5" y="112" width="10.4" height="22" class="vios"/>
+        <text x="703.7" y="127" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="709.9" y="112" width="10.4" height="22" class="surf"/>
+        <text x="715.1" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="721.2" y="112" width="10.4" height="22" class="surf"/>
+        <text x="726.4" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="732.6" y="112" width="10.4" height="22" class="surf"/>
+        <text x="737.8" y="127" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="71.4" y="110" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <rect x="253.4" y="110" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <rect x="446.8" y="110" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <rect x="640.1" y="110" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <circle cx="24" cy="154" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="158" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="38" y="158" font-size="11.5" class="acc" font-weight="600">all four are 1 → “maybe here”: read the 4 KB page and scan it</text>
+        <text x="16" y="190" font-size="11" class="ink" font-weight="600">lookup "user:7 friend:3": its 4 positions are bits 9, 24, 44 and 60</text>
+        <rect x="16.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="21.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="27.4" y="198" width="10.4" height="22" class="surf"/>
+        <text x="32.6" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="38.8" y="198" width="10.4" height="22" class="vios"/>
+        <text x="43.9" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="50.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="55.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="61.5" y="198" width="10.4" height="22" class="surf"/>
+        <text x="66.7" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="72.9" y="198" width="10.4" height="22" class="vios"/>
+        <text x="78.1" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="84.2" y="198" width="10.4" height="22" class="surf"/>
+        <text x="89.4" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="95.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="100.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="107.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="112.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="118.4" y="198" width="10.4" height="22" class="vios"/>
+        <text x="123.6" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="129.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="134.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="141.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="146.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="152.5" y="198" width="10.4" height="22" class="surf"/>
+        <text x="157.7" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="163.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="169.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="175.2" y="198" width="10.4" height="22" class="vios"/>
+        <text x="180.4" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="186.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="191.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="198.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="203.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="209.4" y="198" width="10.4" height="22" class="vios"/>
+        <text x="214.6" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="220.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="225.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="232.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="237.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="243.5" y="198" width="10.4" height="22" class="surf"/>
+        <text x="248.7" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="254.9" y="198" width="10.4" height="22" class="vios"/>
+        <text x="260.1" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="266.2" y="198" width="10.4" height="22" class="surf"/>
+        <text x="271.4" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="277.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="282.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="289.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="294.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="300.4" y="198" width="10.4" height="22" class="surf"/>
+        <text x="305.6" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="311.8" y="198" width="10.4" height="22" class="vios"/>
+        <text x="316.9" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="323.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="328.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="334.5" y="198" width="10.4" height="22" class="surf"/>
+        <text x="339.7" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="345.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="351.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="357.2" y="198" width="10.4" height="22" class="vios"/>
+        <text x="362.4" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="368.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="373.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="380.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="385.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="391.4" y="198" width="10.4" height="22" class="vios"/>
+        <text x="396.6" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="402.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="407.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="414.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="419.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="425.5" y="198" width="10.4" height="22" class="surf"/>
+        <text x="430.7" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="436.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="442.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="448.2" y="198" width="10.4" height="22" class="vios"/>
+        <text x="453.4" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="459.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="464.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="471.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="476.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="482.4" y="198" width="10.4" height="22" class="vios"/>
+        <text x="487.6" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="493.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="498.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="505.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="510.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="516.5" y="198" width="10.4" height="22" class="vios"/>
+        <text x="521.7" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="527.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="533.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="539.2" y="198" width="10.4" height="22" class="surf"/>
+        <text x="544.4" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="550.6" y="198" width="10.4" height="22" class="vios"/>
+        <text x="555.8" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="562.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="567.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="573.4" y="198" width="10.4" height="22" class="surf"/>
+        <text x="578.6" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="584.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="589.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="596.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="601.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="607.5" y="198" width="10.4" height="22" class="vios"/>
+        <text x="612.7" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="618.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="624.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="630.2" y="198" width="10.4" height="22" class="surf"/>
+        <text x="635.4" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="641.6" y="198" width="10.4" height="22" class="vios"/>
+        <text x="646.8" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="653.0" y="198" width="10.4" height="22" class="surf"/>
+        <text x="658.2" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="664.4" y="198" width="10.4" height="22" class="surf"/>
+        <text x="669.6" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="675.8" y="198" width="10.4" height="22" class="surf"/>
+        <text x="680.9" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="687.1" y="198" width="10.4" height="22" class="surf"/>
+        <text x="692.3" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="698.5" y="198" width="10.4" height="22" class="vios"/>
+        <text x="703.7" y="213" font-size="9" class="mono vio" text-anchor="middle">1</text>
+        <rect x="709.9" y="198" width="10.4" height="22" class="surf"/>
+        <text x="715.1" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="721.2" y="198" width="10.4" height="22" class="surf"/>
+        <text x="726.4" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="732.6" y="198" width="10.4" height="22" class="surf"/>
+        <text x="737.8" y="213" font-size="9" class="mono mut" text-anchor="middle">0</text>
+        <rect x="116.9" y="196" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <rect x="287.5" y="196" width="13.4" height="26" style="fill:none;stroke:var(--stop);stroke-width:2.5" rx="2"/>
+        <rect x="515.0" y="196" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <rect x="697.0" y="196" width="13.4" height="26" style="fill:none;stroke:var(--accent);stroke-width:2.5" rx="2"/>
+        <circle cx="24" cy="240" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="24" y="244" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="38" y="244" font-size="11.5" class="stp" font-weight="600">bit 24 is 0 → “certainly not here”: a miss that costs no flash read</text>
+        <rect x="16" y="262" width="728" height="62" rx="6" class="surf"/>
+        <text x="28" y="282" font-size="11" class="ink">“Maybe” can be wrong: other keys may have turned on all four bits. Then one 4 KB read is wasted; the answer is never wrong.</text>
+        <text x="28" y="300" font-size="11" class="ink">A filter cannot forget one key, so CacheLib rebuilds a set’s filter from its page each time the page is rewritten.</text>
+        <text x="28" y="316" font-size="10.5" class="mut">How many bits buy how few false “maybe”s:</text>
+        <rect x="274" y="304" width="76" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="312" y="317" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.6.1</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 5. A Bloom filter, for one set. Every key in the set's page turned on 4 of the 64 bits. A lookup checks the same 4 positions for its own key. ① All four are 1: the key may be there, so the page is read. ② One is 0: the key was never added, so the read is skipped. The bit positions are made up for the drawing; the 8 bytes and 4 positions per key are CacheLib's (§4.2).</p>
+  </div>
+  <p><b>The idea.</b> In §3, every lookup reads a page, even for a key that is not cached, and then finds nothing. A Bloom filter is a few bits in DRAM that answer, without touching flash, either "certainly not here" or "maybe here". CacheLib keeps one per set, 8 bytes, and reads the page only on "maybe". <span class="src">CacheLib §4.2</span></p>
+  <p>Figure 5 shows how it answers. Every key in the set's page has turned on 4 of the filter's 64 bits, at positions computed from the key's hash. A lookup computes the same 4 positions for its own key. If all four are 1, the key may be there, and the page is read (①). If any is 0, the key was never added, and the miss costs no flash read (②).</p>
+  <p>"Maybe" is sometimes wrong, because other keys can turn on the same bits; then one read is wasted, but the answer is never wrong. A filter cannot take one key back out, so it is rebuilt from the page whenever the page is rewritten. How many bits buy how few wrong "maybe"s is tree node 1.6.1. <span class="src">CacheLib §4.2, Figs. 10–11</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A Bloom filter spends a few bits of DRAM per key to answer "certainly not here" or "maybe here", so a set cache reads flash only when the key may be there.</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="n">§5</span><h2>What does Kangaroo put together?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문맥</span></div>
+  <div class="figure" id="fig-kangaroo">
+    <div class="scroll">
+      <svg viewBox="0 0 760 350" width="760" role="img" aria-label="Kangaroo has three layers: a DRAM cache under one percent, KLog, a log-structured cache of about five percent with a DRAM index, and KSet, a set-associative cache of about ninety-five percent with filters only. Objects in KLog are grouped by the set they hash to; when one leaves for KSet, all KLog objects for the same set go in one write, and a set with fewer than the threshold of waiting objects is skipped">
+        <defs><marker id="h6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Kangaroo: a small log in front of the sets, so set writes carry several new objects</text>
+        <rect x="16" y="34" width="172" height="50" rx="6" class="surf"/>
+        <text x="28" y="54" font-size="11.5" class="ink" font-weight="600">DRAM cache</text>
+        <text x="28" y="72" font-size="10.5" class="ink2">&lt; 1% of capacity</text>
+        <rect x="204" y="34" width="260" height="50" rx="6" class="ambs"/>
+        <text x="216" y="54" font-size="11.5" class="ink" font-weight="600">KLog: a log-structured cache</text>
+        <text x="216" y="72" font-size="10.5" class="ink2">≈ 5%: has a DRAM index (Fig. 3)</text>
+        <rect x="480" y="34" width="264" height="50" rx="6" class="accs"/>
+        <text x="492" y="54" font-size="11.5" class="ink" font-weight="600">KSet: a set-associative cache</text>
+        <text x="492" y="72" font-size="10.5" class="ink2">≈ 95%: filters only (Figs. 4–5)</text>
+        <path d="M188 59 H202" class="arr" marker-end="url(#h6a)"/>
+        <path d="M464 59 H478" class="arr" marker-end="url(#h6a)"/>
+        <text x="16" y="100" font-size="10.5" class="mut">A lookup and an insert both go left to right; a lookup stops at the first layer that has the key (Kangaroo §3).</text>
+        <text x="16" y="128" font-size="11.5" class="ink" font-weight="600">Inside KLog, objects are colored by the set their key hashes to</text>
+        <rect x="16" y="138" width="42" height="28" class="vios"/>
+        <text x="37" y="157" font-size="9.5" class="ink" text-anchor="middle">set 12</text>
+        <rect x="62" y="138" width="42" height="28" class="stps"/>
+        <text x="83" y="157" font-size="9.5" class="ink" text-anchor="middle">set 40</text>
+        <rect x="108" y="138" width="42" height="28" class="vios"/>
+        <text x="129" y="157" font-size="9.5" class="ink" text-anchor="middle">set 12</text>
+        <rect x="154" y="138" width="42" height="28" class="ambs"/>
+        <text x="175" y="157" font-size="9.5" class="ink" text-anchor="middle">set 7</text>
+        <rect x="200" y="138" width="42" height="28" class="vios"/>
+        <text x="221" y="157" font-size="9.5" class="ink" text-anchor="middle">set 12</text>
+        <rect x="246" y="138" width="42" height="28" class="ambs"/>
+        <text x="267" y="157" font-size="9.5" class="ink" text-anchor="middle">set 7</text>
+        <rect x="292" y="138" width="42" height="28" class="surf"/>
+        <text x="313" y="157" font-size="9.5" class="ink" text-anchor="middle">set 33</text>
+        <rect x="338" y="138" width="42" height="28" class="vios"/>
+        <text x="359" y="157" font-size="9.5" class="ink" text-anchor="middle">set 12</text>
+        <rect x="384" y="138" width="42" height="28" class="stps"/>
+        <text x="405" y="157" font-size="9.5" class="ink" text-anchor="middle">set 40</text>
+        <rect x="430" y="138" width="42" height="28" class="ambs"/>
+        <text x="451" y="157" font-size="9.5" class="ink" text-anchor="middle">set 7</text>
+        <text x="16" y="182" font-size="10" class="mut">oldest</text>
+        <text x="430" y="182" font-size="10" class="mut">newest</text>
+        <circle cx="490" cy="150" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="490" y="154" font-size="10" class="vio" font-weight="600" text-anchor="middle">1</text>
+        <text x="504" y="148" font-size="10.5" class="ink">the oldest object, bound for set 12, must leave;</text>
+        <text x="504" y="162" font-size="10.5" class="ink">all four set-12 objects in KLog leave with it</text>
+        <path d="M200 194 V214" class="arr" marker-end="url(#h6a)"/>
+        <rect x="16" y="216" width="356" height="62" rx="6" class="vios"/>
+        <text x="28" y="236" font-size="11.5" class="vio" font-weight="600">one 4 KB write to set 12 carries 4 new objects</text>
+        <text x="28" y="254" font-size="11" class="ink">the set write is shared, about a quarter each</text>
+        <text x="28" y="270" font-size="10.5" class="mut">“KLog minimizes flash writes” (§3)</text>
+        <rect x="388" y="216" width="356" height="62" rx="6" class="stps"/>
+        <circle cx="400" cy="232" r="8" style="fill:var(--surface);stroke:var(--violet)"/><text x="400" y="236" font-size="10" class="vio" font-weight="600" text-anchor="middle">2</text>
+        <text x="414" y="236" font-size="11.5" class="stp" font-weight="600">set 33 has only 1 object waiting</text>
+        <text x="414" y="254" font-size="11" class="ink">below the threshold n = 2: not worth a 4 KB write;</text>
+        <text x="414" y="270" font-size="11" class="ink">dropped, or put back in KLog if it was read</text>
+        <rect x="16" y="292" width="728" height="46" rx="6" class="surf"/>
+        <text x="28" y="311" font-size="11.5" class="acc" font-weight="600">DRAM: 7.0 bits per object</text>
+        <text x="214" y="311" font-size="11" class="ink2">an index only for KLog’s 5%; KSet needs filters only</text>
+        <text x="28" y="329" font-size="11.5" class="acc" font-weight="600">ALWA 5.8 against 17.9 for sets alone</text>
+        <text x="286" y="329" font-size="11" class="ink2">the paper’s own example;</text>
+        <rect x="450" y="316" width="150" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="525" y="329" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.4 re-checks it</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 6. Kangaroo combines Figures 3 and 4. KLog is small enough that its per-object index is cheap; KSet holds almost everything with no index. ① When an object leaves KLog, every KLog object bound for the same set leaves with it, so one 4 KB set write carries several new objects. ② When too few would go, the write is skipped. Numbers: Kangaroo Table 1 and §3.</p>
+  </div>
+  <p><b>The idea.</b> Use each design where it is cheap. Kangaroo states the dilemma of §2 and §3 in one line: "Log-structured caches require too much DRAM, and set-associative caches add too much write amplification." Its answer is a small log, KLog, about 5% of the flash, in front of a large set area, KSet, about 95% (Figure 6, top). KLog's index is cheap because KLog holds few objects, and KSet needs only filters. The shape is <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s6">page ③ §6</a>'s hybrid mapping one layer up: a small area with an entry for every item, in front of a large area that needs far fewer. <span class="src">Kangaroo §2.3 and §3</span></p>
+  <p>New objects enter KLog first. When one has to move on to KSet, every KLog object bound for the same set goes with it, so one 4 KB set write carries several new objects instead of one (①). If too few would go, fewer than a threshold n, the write is not worth it: they are dropped, or kept in KLog if they were read there (②). <span class="src">Kangaroo §3 and §4.3</span></p>
+  <p>The result is 7.0 bits of DRAM per object, and set writes that carry several objects each: in the paper's own example, the cache writes 5.8 times the new data, against 17.9 for sets alone (this ratio, ALWA, is §8's). tree node 1.7.4 re-checks the example. <span class="src">Kangaroo Table 1 and §3</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Kangaroo puts a small log with an index in front of a large set area without one. The log gathers objects bound for the same set, so each set write carries several of them, and DRAM stays near the sets' level.</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="n">§6</span><h2>Why is DRAM the cost to fight?</h2><span class="tag t-what">main · read</span><span class="tag t-his">왜 · in detail</span></div>
+  <div class="figure" id="fig-dram">
+    <div class="scroll">
+      <svg viewBox="0 0 760 332" width="760" role="img" aria-label="A 4.25 terabyte cache costs 130,900 dollars as seventeen DRAM servers and 12,500 dollars as one server with four SSDs. Three more costs of DRAM: its price falls slower than flash, it draws power all the time, and it is fixed per server. So only the map stays in DRAM">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">Why not keep the whole cache in DRAM? A 4.25 TB cache, priced both ways (Flashield, 2019)</text>
+        <text x="16" y="50" font-size="11.5" class="ink" font-weight="600">DRAM only</text>
+        <text x="16" y="65" font-size="10.5" class="mut">17 servers × 256 GB DRAM</text>
+        <rect x="200" y="40" width="440" height="24" rx="3" class="stps"/>
+        <text x="648.0" y="57" font-size="12" class="stp" font-weight="600">$130,900</text>
+        <text x="16" y="94" font-size="11.5" class="ink" font-weight="600">flash + DRAM</text>
+        <text x="16" y="109" font-size="10.5" class="mut">1 server + 4 × 1 TB SSD</text>
+        <rect x="200" y="84" width="42" height="24" rx="3" class="accs"/>
+        <text x="250.01680672268907" y="101" font-size="12" class="acc" font-weight="600">$12,500: more than 10× cheaper</text>
+        <text x="16" y="132" font-size="9.5" class="mono mut">Flashield Table 1</text>
+        <text x="16" y="160" font-size="12" class="ink" font-weight="600">Three costs on top of the price tag</text>
+        <rect x="16" y="170" width="236" height="88" rx="6" class="surf"/>
+        <text x="28" y="190" font-size="11.5" class="ink" font-weight="600">① the gap keeps widening</text>
+        <text x="28" y="208" font-size="11" class="ink2">2013–2023: flash prices</text>
+        <text x="28" y="224" font-size="11" class="ink2">fell about 14×, DRAM’s 2×</text>
+        <text x="28" y="248" font-size="9.5" class="mono mut">FairyWREN §2, Fig. 2</text>
+        <rect x="262" y="170" width="236" height="88" rx="6" class="surf"/>
+        <text x="274" y="190" font-size="11.5" class="ink" font-weight="600">② it draws power always</text>
+        <text x="274" y="208" font-size="11" class="ink2">up to half a server’s power;</text>
+        <text x="274" y="224" font-size="11" class="ink2">40–50% of a server’s cost</text>
+        <text x="274" y="248" font-size="9.5" class="mono mut">FairyWREN §2</text>
+        <rect x="508" y="170" width="236" height="88" rx="6" class="surf"/>
+        <text x="520" y="190" font-size="11.5" class="ink" font-weight="600">③ it is fixed per server</text>
+        <text x="520" y="208" font-size="11" class="ink2">a few standard configurations;</text>
+        <text x="520" y="224" font-size="11" class="ink2">every service is asked to use less</text>
+        <text x="520" y="248" font-size="9.5" class="mono mut">Kangaroo §2.2</text>
+        <rect x="16" y="272" width="728" height="48" rx="6" class="vios"/>
+        <text x="28" y="291" font-size="12" class="vio" font-weight="600">So the data goes on flash, and DRAM keeps only what finds it: the map of Figure 1 ①.</text>
+        <text x="28" y="309" font-size="10.5" class="ink">Kangaroo’s abstract: “very few bits per cached object can be kept in DRAM without losing flash’s cost advantage.”</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 7. Why DRAM is the cost to fight. Top: Flashield prices one cache size both ways. Below: three costs that the price tag leaves out, ① to ③. The violet box is the plan every paper starts from, and the reason the map of Figure 1 ① must stay small.</p>
+  </div>
+  <p>§0 used the price tag as step ②; this section gives its source and the three costs the tag leaves out. Holding everything in DRAM is the fast way and the expensive one. Flashield prices a 4.25 TB cache both ways (Figure 7, top): seventeen servers with 256 GB of DRAM each cost $130,900, while one such server with four 1 TB SSDs costs $12,500, more than ten times less. <span class="src">Eisenman et al., Flashield, NSDI 2019, §1 and Table 1</span></p>
+  <p>Three more costs sit on top of the price tag. The gap keeps widening: over 2013–2023, flash prices fell about 14×, DRAM's only about 2× (①). DRAM draws power all the time, up to half of a server's, and makes up 40–50% of a server's cost (②). And DRAM is not a dial a cache can turn up: operators run a few standard server configurations, every service on the machine wants memory, and Facebook's trend has been less DRAM and more flash per server (③). <span class="src">McAllister et al., FairyWREN, OSDI 2024, §2 and Fig. 2 · Kangaroo §2.2</span></p>
+  <p>So a flash cache keeps its data on flash and keeps in DRAM only what finds the data: the map of Figure 1 ①. Kangaroo states the limit in its abstract: "very few bits per cached object can be kept in DRAM without losing flash's cost advantage." OpenStd's founder gives the same reason for the company: RAM has become very expensive, so the cache moves onto SSDs, with algorithms that keep it as fast as RAM. <span class="src">Kangaroo, abstract · Maeil Business Newspaper interview, 2026-10-05</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>DRAM costs about ten times flash per byte, draws power all the time and is fixed per server. So a flash cache keeps only its map in DRAM, and that map has to stay small.</p>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="n">§7</span><h2>What grows, and by how much?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-his">문제 · 어떤걸</span></div>
+  <div class="figure" id="fig-index">
+    <div class="scroll">
+      <svg viewBox="0 0 760 434" width="760" role="img" aria-label="The size of the map divided by the size of the data equals entry size divided by object size. One terabyte holds 270 million 4 KB pages but 11 billion 100-byte objects. A table: the SSD page map costs about 1 percent of the flash bill in DRAM, a log-structured cache with 15-byte entries about 150 percent, Flashield about 37, Kangaroo about 9 and a set-associative cache about 4 percent">
+        <text x="16" y="20" font-size="12.5" class="ink" font-weight="600">Only the map stays in DRAM. How big is it?</text>
+        <rect x="16" y="32" width="728" height="50" rx="6" class="vios"/>
+        <text x="28" y="52" font-size="12" class="mono ink">index ÷ data = (N × entry size) ÷ (N × object size) = entry size ÷ object size</text>
+        <text x="28" y="72" font-size="12" class="mono ink">DRAM bill ÷ flash bill ≈ 10 × entry size ÷ object size     (DRAM ≈ 10× flash per byte, Fig. 7)</text>
+        <text x="16" y="116" font-size="10.5" class="mut">what the SSD’s page map counts (Fig. 1 ②):</text>
+        <text x="16" y="131" font-size="11" class="ink">1 TB of 4 KB pages</text>
+        <rect x="270" y="116" width="330" height="18" class="accs"/>
+        <path d="M278.2 116V134M286.5 116V134M294.8 116V134M303.0 116V134M311.2 116V134M319.5 116V134M327.8 116V134M336.0 116V134M344.2 116V134M352.5 116V134M360.8 116V134M369.0 116V134M377.2 116V134M385.5 116V134M393.8 116V134M402.0 116V134M410.2 116V134M418.5 116V134M426.8 116V134M435.0 116V134M443.2 116V134M451.5 116V134M459.8 116V134M468.0 116V134M476.2 116V134M484.5 116V134M492.8 116V134M501.0 116V134M509.2 116V134M517.5 116V134M525.8 116V134M534.0 116V134M542.2 116V134M550.5 116V134M558.8 116V134M567.0 116V134M575.2 116V134M583.5 116V134M591.8 116V134" class="ln"/>
+        <text x="612" y="130" font-size="11" class="ink">2²⁸ ≈ 2.7 × 10⁸ entries</text>
+        <text x="16" y="156" font-size="10.5" class="mut">what a cache’s map counts (Fig. 1 ①):</text>
+        <text x="16" y="171" font-size="11" class="ink">1 TB of 100 B objects</text>
+        <rect x="270" y="156" width="330" height="18" class="ambs"/>
+        <path d="M270.82 156V174M271.65 156V174M272.48 156V174M273.30 156V174M274.12 156V174M274.95 156V174M275.77 156V174M276.60 156V174M277.43 156V174M278.25 156V174M279.07 156V174M279.90 156V174M280.73 156V174M281.55 156V174M282.38 156V174M283.20 156V174M284.02 156V174M284.85 156V174M285.68 156V174M286.50 156V174M287.32 156V174M288.15 156V174M288.98 156V174M289.80 156V174M290.62 156V174M291.45 156V174M292.27 156V174M293.10 156V174M293.93 156V174M294.75 156V174M295.57 156V174M296.40 156V174M297.23 156V174M298.05 156V174M298.88 156V174M299.70 156V174M300.52 156V174M301.35 156V174M302.18 156V174M303.00 156V174M303.82 156V174M304.65 156V174M305.48 156V174M306.30 156V174M307.12 156V174M307.95 156V174M308.77 156V174M309.60 156V174M310.43 156V174M311.25 156V174M312.07 156V174M312.90 156V174M313.73 156V174M314.55 156V174M315.38 156V174M316.20 156V174M317.02 156V174M317.85 156V174M318.68 156V174M319.50 156V174M320.32 156V174M321.15 156V174M321.98 156V174M322.80 156V174M323.62 156V174M324.45 156V174M325.27 156V174M326.10 156V174M326.93 156V174M327.75 156V174M328.57 156V174M329.40 156V174M330.23 156V174M331.05 156V174M331.88 156V174M332.70 156V174M333.52 156V174M334.35 156V174M335.18 156V174M336.00 156V174M336.82 156V174M337.65 156V174M338.48 156V174M339.30 156V174M340.12 156V174M340.95 156V174M341.77 156V174M342.60 156V174M343.43 156V174M344.25 156V174M345.07 156V174M345.90 156V174M346.73 156V174M347.55 156V174M348.38 156V174M349.20 156V174M350.02 156V174M350.85 156V174M351.68 156V174M352.50 156V174M353.32 156V174M354.15 156V174M354.98 156V174M355.80 156V174M356.62 156V174M357.45 156V174M358.27 156V174M359.10 156V174M359.93 156V174M360.75 156V174M361.57 156V174M362.40 156V174M363.23 156V174M364.05 156V174M364.88 156V174M365.70 156V174M366.52 156V174M367.35 156V174M368.18 156V174M369.00 156V174M369.82 156V174M370.65 156V174M371.48 156V174M372.30 156V174M373.12 156V174M373.95 156V174M374.77 156V174M375.60 156V174M376.43 156V174M377.25 156V174M378.07 156V174M378.90 156V174M379.73 156V174M380.55 156V174M381.38 156V174M382.20 156V174M383.02 156V174M383.85 156V174M384.68 156V174M385.50 156V174M386.32 156V174M387.15 156V174M387.98 156V174M388.80 156V174M389.62 156V174M390.45 156V174M391.27 156V174M392.10 156V174M392.93 156V174M393.75 156V174M394.57 156V174M395.40 156V174M396.23 156V174M397.05 156V174M397.88 156V174M398.70 156V174M399.52 156V174M400.35 156V174M401.18 156V174M402.00 156V174M402.82 156V174M403.65 156V174M404.48 156V174M405.30 156V174M406.12 156V174M406.95 156V174M407.77 156V174M408.60 156V174M409.43 156V174M410.25 156V174M411.07 156V174M411.90 156V174M412.73 156V174M413.55 156V174M414.38 156V174M415.20 156V174M416.02 156V174M416.85 156V174M417.68 156V174M418.50 156V174M419.32 156V174M420.15 156V174M420.98 156V174M421.80 156V174M422.62 156V174M423.45 156V174M424.27 156V174M425.10 156V174M425.93 156V174M426.75 156V174M427.57 156V174M428.40 156V174M429.23 156V174M430.05 156V174M430.88 156V174M431.70 156V174M432.52 156V174M433.35 156V174M434.18 156V174M435.00 156V174M435.82 156V174M436.65 156V174M437.48 156V174M438.30 156V174M439.12 156V174M439.95 156V174M440.77 156V174M441.60 156V174M442.43 156V174M443.25 156V174M444.07 156V174M444.90 156V174M445.73 156V174M446.55 156V174M447.38 156V174M448.20 156V174M449.02 156V174M449.85 156V174M450.68 156V174M451.50 156V174M452.32 156V174M453.15 156V174M453.98 156V174M454.80 156V174M455.62 156V174M456.45 156V174M457.27 156V174M458.10 156V174M458.93 156V174M459.75 156V174M460.57 156V174M461.40 156V174M462.23 156V174M463.05 156V174M463.88 156V174M464.70 156V174M465.52 156V174M466.35 156V174M467.18 156V174M468.00 156V174M468.82 156V174M469.65 156V174M470.48 156V174M471.30 156V174M472.12 156V174M472.95 156V174M473.77 156V174M474.60 156V174M475.43 156V174M476.25 156V174M477.07 156V174M477.90 156V174M478.73 156V174M479.55 156V174M480.38 156V174M481.20 156V174M482.02 156V174M482.85 156V174M483.68 156V174M484.50 156V174M485.32 156V174M486.15 156V174M486.98 156V174M487.80 156V174M488.62 156V174M489.45 156V174M490.27 156V174M491.10 156V174M491.93 156V174M492.75 156V174M493.57 156V174M494.40 156V174M495.23 156V174M496.05 156V174M496.88 156V174M497.70 156V174M498.52 156V174M499.35 156V174M500.18 156V174M501.00 156V174M501.82 156V174M502.65 156V174M503.48 156V174M504.30 156V174M505.12 156V174M505.95 156V174M506.77 156V174M507.60 156V174M508.43 156V174M509.25 156V174M510.07 156V174M510.90 156V174M511.73 156V174M512.55 156V174M513.38 156V174M514.20 156V174M515.02 156V174M515.85 156V174M516.67 156V174M517.50 156V174M518.33 156V174M519.15 156V174M519.98 156V174M520.80 156V174M521.62 156V174M522.45 156V174M523.27 156V174M524.10 156V174M524.92 156V174M525.75 156V174M526.58 156V174M527.40 156V174M528.23 156V174M529.05 156V174M529.88 156V174M530.70 156V174M531.52 156V174M532.35 156V174M533.17 156V174M534.00 156V174M534.83 156V174M535.65 156V174M536.48 156V174M537.30 156V174M538.12 156V174M538.95 156V174M539.77 156V174M540.60 156V174M541.42 156V174M542.25 156V174M543.08 156V174M543.90 156V174M544.73 156V174M545.55 156V174M546.38 156V174M547.20 156V174M548.02 156V174M548.85 156V174M549.67 156V174M550.50 156V174M551.33 156V174M552.15 156V174M552.98 156V174M553.80 156V174M554.62 156V174M555.45 156V174M556.27 156V174M557.10 156V174M557.92 156V174M558.75 156V174M559.58 156V174M560.40 156V174M561.23 156V174M562.05 156V174M562.88 156V174M563.70 156V174M564.52 156V174M565.35 156V174M566.17 156V174M567.00 156V174M567.83 156V174M568.65 156V174M569.48 156V174M570.30 156V174M571.12 156V174M571.95 156V174M572.77 156V174M573.60 156V174M574.42 156V174M575.25 156V174M576.08 156V174M576.90 156V174M577.73 156V174M578.55 156V174M579.38 156V174M580.20 156V174M581.02 156V174M581.85 156V174M582.67 156V174M583.50 156V174M584.33 156V174M585.15 156V174M585.98 156V174M586.80 156V174M587.62 156V174M588.45 156V174M589.27 156V174M590.10 156V174M590.92 156V174M591.75 156V174M592.58 156V174M593.40 156V174M594.23 156V174M595.05 156V174M595.88 156V174M596.70 156V174M597.52 156V174M598.35 156V174M599.17 156V174" class="ln" style="stroke-width:.5"/>
+        <text x="612" y="170" font-size="11" class="stp" font-weight="600">≈ 1.1 × 10¹⁰: 41× more</text>
+        <text x="16" y="198" font-size="11" class="ink2">Each entry is also bigger than the page map’s 4 B: a place on flash, a tag, a chain pointer, eviction bits (Fig. 3).</text>
+        <text x="16" y="226" font-size="9.5" class="mono mut">WHAT DRAM HOLDS</text>
+        <text x="352" y="226" font-size="9.5" class="mono mut">PER ENTRY</text>
+        <text x="448" y="226" font-size="9.5" class="mono mut">INDEX ÷ DATA</text>
+        <text x="556" y="226" font-size="9.5" class="mono mut">DRAM BILL ÷ FLASH BILL</text>
+        <path d="M16 232 H744" class="ln"/>
+        <text x="16" y="252" font-size="11.5" class="ink2">the SSD’s page map: one entry per 4 KB page</text>
+        <text x="352" y="252" font-size="11.5" class="ink">4 B</text>
+        <text x="448" y="252" font-size="11.5" class="ink">0.1%</text>
+        <text x="556" y="252" font-size="12" class="ink" font-weight="600">≈ 1%</text>
+        <text x="16" y="274" font-size="11.5" class="ink">a log-structured cache, 100 B objects (Fig. 3)</text>
+        <text x="352" y="274" font-size="11.5" class="ink">≥ 15 B</text>
+        <text x="448" y="274" font-size="11.5" class="ink">≥ 15%</text>
+        <text x="556" y="274" font-size="12" class="stp" font-weight="600">≥ 150%</text>
+        <text x="16" y="296" font-size="11.5" class="ink2">Flashield’s optimized log index</text>
+        <text x="352" y="296" font-size="11.5" class="ink">≈ 30 bits</text>
+        <text x="448" y="296" font-size="11.5" class="ink">≈ 3.75%</text>
+        <text x="556" y="296" font-size="12" class="stp" font-weight="600">≈ 37%</text>
+        <text x="16" y="318" font-size="11.5" class="ink2">Kangaroo: KLog index + KSet filters (Fig. 6)</text>
+        <text x="352" y="318" font-size="11.5" class="ink">≈ 7 bits</text>
+        <text x="448" y="318" font-size="11.5" class="ink">≈ 0.9%</text>
+        <text x="556" y="318" font-size="12" class="ink" font-weight="600">≈ 9%</text>
+        <text x="16" y="340" font-size="11.5" class="ink2">a set-associative cache: filters only (Fig. 4)</text>
+        <text x="352" y="340" font-size="11.5" class="ink">≈ 3 bits</text>
+        <text x="448" y="340" font-size="11.5" class="ink">≈ 0.4%</text>
+        <text x="556" y="340" font-size="12" class="ink" font-weight="600">≈ 4%</text>
+        <text x="16" y="364" font-size="10" class="mut">right column = the formula above, on each paper’s bits per object (my arithmetic)</text>
+        <text x="16" y="380" font-size="9.5" class="mono mut">Nemo §2.3 (log index) · Kangaroo §2.3 (Flashield, sets) · Kangaroo Table 1 (Kangaroo)</text>
+        <rect x="16" y="392" width="728" height="30" rx="6" class="stps"/>
+        <text x="28" y="412" font-size="12" class="stp" font-weight="600">A full entry per tiny object makes the map’s DRAM cost more than the flash holding the data.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 8. How big the map is. The formula on top is the whole argument: the count N cancels, so only entry size over object size matters, and DRAM's price multiplies it by about 10. The two strips show the count anyway: the cache's map has 41 times more entries than the SSD's. The table runs the formula for each design on this page. The strips are schematic; the bits per object are the papers'.</p>
+  </div>
+  <p>Figure 8 asks how big that map is. The answer is one division: the number of objects cancels, and only the entry size over the object size is left.</p>
+  <ol class="steps">
+    <li><div class="st"><b>An index holds one entry per thing it finds.</b><span>N objects need N entries of e bytes each: N × e bytes of DRAM. §1 showed why the cache's map has an entry per object, not per page.</span></div></li>
+    <li><div class="st"><b>The data is the same N things, of s bytes each: N × s bytes of flash.</b><span>So index ÷ data = (N × e) ÷ (N × s) = e ÷ s. N cancels: a bigger drive grows both alike, and only the entry size against the object size matters.</span></div></li>
+    <li><div class="st"><b>The SSD's page map: e = 4 B for every s = 4,096 B page, so 0.1%.</b><span>This is <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">page ③ §5</a>'s 1 GB of DRAM per TB of flash.</span></div></li>
+    <li><div class="st"><b>A log-structured cache: e ≥ 15 B for every s = 100 B object, so at least 15%.</b><span>That is 150 times the page map's share. The count does not help either (Figure 8, strips): a terabyte holds 2<sup>28</sup> ≈ 2.7 × 10<sup>8</sup> pages but about 1.1 × 10<sup>10</sup> objects of 100 B, 41 times more entries. <span class="src">Nemo §2.3</span></span></div></li>
+    <li><div class="st"><b>Price it: DRAM bill ÷ flash bill ≈ 10 × e ÷ s.</b><span>DRAM costs about ten times flash per byte (§6), so the page map's DRAM costs about 1% of its flash, and the log cache's map about 150%. The map that says where the data is would cost more than the flash that holds it.</span></div></li>
+  </ol>
+  <p>The table in Figure 8 runs the same formula for each design on this page. Flashield's optimized 30 bits give about 37% of the flash bill, Kangaroo's 7 bits about 9%, and filters alone about 4%. Kangaroo gives the absolute version: even Flashield's index would need 75 GB of DRAM for 2 TB of 100-byte objects, while Kangaroo's own Facebook test gives a 1.9 TB drive 16 GB of DRAM in total. That jump, from 1% to 150%, is why every paper counts DRAM in bits per object. <span class="src">arithmetic on Nemo §2.3 and Flashield §1 · Kangaroo §2.3 and Fig. 1</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>index ÷ data = entry size ÷ object size; the object count cancels. At 15 B per 100 B object the map is 15% of the data and, at DRAM's price, about 150% of the flash bill, against 1% for the SSD's page map. The two ways out: shrink the entry (fewer bits per object), or stop keeping one per object (sets).</p>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="n">§8</span><h2>How do the papers cut the bill?</h2><span class="tag t-ks">★ core · read every line</span><span class="tag t-his">문제 · how</span></div>
+  <div class="figure" id="fig-papers">
+    <div class="scroll">
+      <svg viewBox="0 0 760 588" width="760" role="img" aria-label="Top: a 100-byte object becomes a 4 KB set write in the cache and 8 KB of flash programs in the SSD, 80 times its size. Bottom: Flashield, Kangaroo, FairyWREN and Nemo as a chain, each fixing what the one before left, and KVell on the separate axis of CPU cores">
+        <defs><marker id="h9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ink2"/></marker></defs>
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">① Writes multiply across the two layers</text>
+        <rect x="16" y="34" width="120" height="50" rx="6" class="ambs"/>
+        <text x="28" y="56" font-size="14" class="ink" font-weight="600">100 B</text>
+        <text x="28" y="74" font-size="10.5" class="ink2">a new object</text>
+        <rect x="236" y="34" width="150" height="50" rx="6" class="vios"/>
+        <text x="248" y="56" font-size="14" class="ink" font-weight="600">4 KB</text>
+        <text x="248" y="74" font-size="10.5" class="ink2">the cache writes a set</text>
+        <rect x="486" y="34" width="160" height="50" rx="6" class="accs"/>
+        <text x="498" y="56" font-size="14" class="ink" font-weight="600">8 KB</text>
+        <text x="498" y="74" font-size="10.5" class="ink2">the SSD programs flash</text>
+        <path d="M136 59 H232" class="arr" marker-end="url(#h9a)"/>
+        <text x="142" y="52" font-size="11" class="vio" font-weight="600">× ALWA ≈ 40</text>
+        <path d="M386 59 H482" class="arr" marker-end="url(#h9a)"/>
+        <text x="396" y="52" font-size="11" class="acc" font-weight="600">× DLWA 2</text>
+        <text x="660" y="56" font-size="14" class="stp" font-weight="600">= 80×</text>
+        <text x="660" y="74" font-size="10" class="ink2">flash bytes per</text>
+        <text x="660" y="86" font-size="10" class="ink2">object byte</text>
+        <text x="16" y="108" font-size="11" class="ink2">ALWA: the cache rewriting its own data (Fig. 4). DLWA: the SSD’s GC copies beneath it, page ③’s 1/(1−u). They multiply.</text>
+        <text x="16" y="126" font-size="11" class="ink">CacheLib in production: small-object ALWA ≈ 6.5×, DLWA 1.1–1.4×, held that low by leaving 50% of the flash empty (§5.2).</text>
+        <path d="M16 142 H744" class="ln"/>
+        <text x="16" y="168" font-size="12" class="ink" font-weight="600">② Each paper fixes what the design before it left</text>
+        <text x="16" y="186" font-size="10.5" class="mut">the move, its own headline number, and what it left for the next paper</text>
+        <rect x="16" y="196" width="728" height="62" rx="6" class="surf"/>
+        <text x="28" y="212" font-size="12.5" class="ink" font-weight="600">Flashield</text>
+        <text x="28" y="227" font-size="10" class="mono mut">NSDI 2019</text>
+        <rect x="28" y="234" width="70" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="63" y="247" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.2</text>
+        <text x="130" y="212" font-size="11.5" class="ink">A log (Fig. 3). New objects wait in DRAM, and only those</text>
+        <text x="130" y="228" font-size="11.5" class="ink">predicted to be read again are written to flash.</text>
+        <text x="566" y="212" font-size="11.5" class="vio" font-weight="600">index ≈ 30 bits per object</text>
+        <text x="566" y="228" font-size="11" class="vio">(Kangaroo’s count)</text>
+        <text x="130" y="248" font-size="10.5" class="stp">left over: still one entry per object, so DRAM grows with the flash: 75 GB for 2 TB of 100 B objects</text>
+        <path d="M380 259 V270" class="arr" marker-end="url(#h9a)"/>
+        <rect x="16" y="272" width="728" height="62" rx="6" class="surf"/>
+        <text x="28" y="288" font-size="12.5" class="ink" font-weight="600">Kangaroo</text>
+        <text x="28" y="303" font-size="10" class="mono mut">SOSP 2021</text>
+        <rect x="28" y="310" width="70" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="63" y="323" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.4</text>
+        <text x="130" y="288" font-size="11.5" class="ink">A small log in front of the sets (Fig. 6): objects bound for</text>
+        <text x="130" y="304" font-size="11.5" class="ink">one set move together, or not at all.</text>
+        <text x="566" y="288" font-size="11.5" class="vio" font-weight="600">7.0 bits per object;</text>
+        <text x="566" y="304" font-size="11" class="vio">ALWA 5.8 (sets alone: 17.9)</text>
+        <text x="130" y="324" font-size="10.5" class="stp">left over: every set write is a random 4 KB write, the worst case for DLWA (FairyWREN §3.3)</text>
+        <path d="M380 335 V346" class="arr" marker-end="url(#h9a)"/>
+        <rect x="16" y="348" width="728" height="62" rx="6" class="surf"/>
+        <text x="28" y="364" font-size="12.5" class="ink" font-weight="600">FairyWREN</text>
+        <text x="28" y="379" font-size="10" class="mono mut">OSDI 2024</text>
+        <rect x="28" y="386" width="70" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="63" y="399" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.5</text>
+        <text x="130" y="364" font-size="11.5" class="ink">On ZNS/FDP SSDs the cache collects and erases for itself; a set</text>
+        <text x="130" y="380" font-size="11.5" class="ink">that GC must copy anyway takes its waiting log objects along.</text>
+        <text x="566" y="364" font-size="11.5" class="vio" font-weight="600">12.5× fewer flash writes</text>
+        <text x="566" y="380" font-size="11" class="vio">than Kangaroo (its claim)</text>
+        <text x="130" y="400" font-size="10.5" class="stp">left over (Nemo §1, §3): a set write still carries one or two new objects; sets ≈ 7% new, WA over 15×</text>
+        <path d="M380 411 V422" class="arr" marker-end="url(#h9a)"/>
+        <rect x="16" y="424" width="728" height="62" rx="6" class="surf"/>
+        <text x="28" y="440" font-size="12.5" class="ink" font-weight="600">Nemo</text>
+        <text x="28" y="455" font-size="10" class="mono mut">ASPLOS 2026</text>
+        <rect x="28" y="462" width="70" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="63" y="475" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.6</text>
+        <text x="130" y="440" font-size="11.5" class="ink">Few, large set-groups fill up in DRAM, then are written and</text>
+        <text x="130" y="456" font-size="11.5" class="ink">evicted whole: no old set is ever read back and rewritten.</text>
+        <text x="566" y="440" font-size="11.5" class="vio" font-weight="600">WA 1.56, DLWA ≈ 1;</text>
+        <text x="566" y="456" font-size="11" class="vio">8.3 bits per object</text>
+        <text x="130" y="476" font-size="10.5" class="stp">open: the index is Bloom filters, partly on flash, so some lookups read a filter or a wrong set first</text>
+        <path d="M16 506 H744" class="ln" stroke-dasharray="2 4"/>
+        <rect x="16" y="514" width="728" height="62" rx="6" class="ambs"/>
+        <text x="28" y="530" font-size="12.5" class="ink" font-weight="600">KVell</text>
+        <text x="28" y="545" font-size="10" class="mono mut">SOSP 2019</text>
+        <rect x="28" y="552" width="70" height="18" rx="9" style="fill:var(--surface);stroke:var(--accent)"/><text x="63" y="565" font-size="10" class="acc" font-weight="600" text-anchor="middle">tree 1.7.1</text>
+        <text x="130" y="530" font-size="11.5" class="ink">Another axis. A store, not a cache: on NVMe drives the CPU, not</text>
+        <text x="130" y="546" font-size="11.5" class="ink">the drive, is the bottleneck, so each core owns its data.</text>
+        <text x="566" y="530" font-size="11.5" class="vio" font-weight="600">2–5× the closest store’s</text>
+        <text x="566" y="546" font-size="11" class="vio">throughput (its claim)</text>
+        <text x="130" y="566" font-size="10.5" class="ink2">the axis of OpenKache’s stated design: “scale across CPU cores with minimal sharing”</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 9. How the papers cut the bill. ① A set cache on an ordinary SSD: the cache's factor and the SSD's factor multiply, so one byte of new objects costs about 80 bytes of flash writes (Kangaroo §2.3; DLWA 2 is an example). ② The four caches as a chain: each red line is the problem the next row takes up. KVell sits apart. Every number is the paper's own, on its own traces, so the numbers are not on one scale.</p>
+  </div>
+  <h3>8.1 · Writes multiply across the two layers (Figure 9, ①)</h3>
+  <p>Cutting DRAM with sets costs writes, and the papers count writes in two layers. <b>ALWA</b>, application-level write amplification, is the cache rewriting its own data: a whole 4 KB set for one object (§3), or its own cleaning when its log fills (<a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12</a>). <b>DLWA</b>, device-level, is the SSD's garbage-collection copies beneath that, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">page ③</a>'s 1/(1−u). They multiply, because the SSD amplifies whatever the cache sends it. A set cache at ALWA 40 on a drive at DLWA 2 programs about 80 bytes of flash per byte of new objects, so by page ③'s Figure 3 it gets 1/80 of the drive's erase budget and 1/80 of its write speed. Sets also raise the DLWA itself, because their writes are small and random. CacheLib's production numbers show both layers: its small-object cache measures ALWA about 6.5× and DLWA 1.1–1.4×, and keeps the DLWA that low only by leaving the flash 50% overprovisioned, which its authors call an open challenge. <span class="src">Kangaroo §2.2 and §2.3 · FairyWREN §3.3 · CacheLib §5.2, "Flash endurance"</span></p>
+
+  <h3>8.2 · Each paper fixes what the design before it left (Figure 9, ②)</h3>
+  <p><b>Flashield</b> stays log-structured (§2) and cuts writes at the door. New objects wait in DRAM, and a small classifier sends to flash only those predicted to be read again before they change, so many objects are never written at all. Its index is compact, about 30 bits per object by Kangaroo's count, but still one entry per object, so its DRAM grows with the flash. tree node 1.7.2. <span class="src">Flashield §1 · Kangaroo §2.3</span></p>
+  <p><b>Kangaroo</b> is §5's design: 7 bits per object and a fraction of the sets' ALWA. What it leaves is the write pattern: every set write is still a random 4 KB write, the worst case for DLWA. tree node 1.7.4. <span class="src">Kangaroo §3 · FairyWREN §3.3</span></p>
+  <p><b>FairyWREN</b> takes that up. It moves to SSDs with a Write-Read-Erase interface, ZNS or FDP, where the host places data into erase units and erases them itself, so <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s2">page ③ §2</a>'s collector now runs inside the cache. A set that the collector must copy anyway can then take its waiting log objects in the same write ("nest packing"), and objects with different lifetimes go to different erase units, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">page ③ §10.1</a>'s grouping by death time (<a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.6</a>). Its claim: 12.5× fewer flash writes than Kangaroo. tree node 1.7.5; zoned SSDs in tree node 1.3.3. <span class="src">FairyWREN §1, §4.3, §5.1 and §5.3</span></p>
+  <p><b>Nemo</b> re-measures FairyWREN on a commercial ZNS SSD and finds total WA above 15× on a Twitter trace, after fixing bugs in FairyWREN's released code that kept most objects from ever reaching the sets. The cause is the number of sets: with so many, a set write carries only one or two new objects, and a set is about 7% filled by new data when it is written. Nemo hashes into a few large set-groups held in DRAM, fills them to about 89%, then writes each group whole and later evicts it whole, so no old set is ever read back and rewritten: <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s6">page ③ §6</a>'s switch merge in place of the partial one. WA 1.56 and DLWA about 1, at 8.3 bits per object, with Bloom filters as the index, kept partly on flash (<a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s7">page ③ §7</a>'s idea, and LFS's: <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12.3</a>). tree node 1.7.6. <span class="src">Nemo §1, §3 and §4.1</span></p>
+  <p><b>KVell</b> works on another axis. It is a persistent key-value store, not a cache, and its finding is that on NVMe drives the CPU, not the drive, is the bottleneck. So each core owns its own slice of the data and needs almost no synchronization, I/O is sent in batches, and nothing is kept sorted on disk. tree node 1.7.1. <span class="src">Lepers et al., KVell, SOSP 2019, §1</span></p>
+  <p><b>CacheLib</b> is Meta's production engine under most of this: the size split of §9, a DRAM cache in front, and admission policies that limit flash writes. Kangaroo, FairyWREN and Nemo are each built as a CacheLib module. tree node 1.7.3. <span class="src">CacheLib §4.2 · Kangaroo §1 · FairyWREN §1 · Nemo §1</span></p>
+
+  <h3>8.3 · What can software above the SSD control?</h3>
+  <p>Everything in Figure 9 is software. The SSD stays a commodity NVMe drive, or a zoned one, and the cache decides what reaches it and in what shape. Each row of the table is one lever, with the place in this series where its effect was built.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>LEVER</th><th>WHAT IT MOVES</th><th>BUILT IN</th><th>IN THE PAPERS</th></tr></thead>
+      <tbody>
+        <tr><td><b>Layout</b>: a log, sets, or both</td><td>DRAM bits per object against ALWA</td><td class="c"><a href="#s2">§2</a>–<a href="#s5">§5</a>, <a href="#s7">§7</a></td><td>CacheLib's size split; Kangaroo; Nemo's set-groups</td></tr>
+        <tr><td><b>Admission</b>: what reaches flash at all</td><td>Every write skipped is saved at every layer</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">③ §3</a>, link 3</td><td>Flashield's classifier; Kangaroo's threshold; CacheLib's policies</td></tr>
+        <tr><td><b>Write shape</b>: large, sequential, grouped by death time</td><td>DLWA toward 1</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">③ §4</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s10">③ §10.1</a>, <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">④ §12.2</a></td><td>CacheLib's log, FIFO and sequential: DLWA 1.5 → 1.05; Nemo's whole-group writes</td></tr>
+        <tr><td><b>Free space left on purpose</b></td><td>u, through u ≤ L ÷ P<sub>full</sub>, so DLWA</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">③ §4</a></td><td>CacheLib's 50% overprovisioning; Nemo's OP ratio</td></tr>
+        <tr><td><b>Who collects</b>: the drive, or the cache on ZNS/FDP</td><td>The cache can drop cold objects instead of copying them, and merge copies with admissions</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s2">③ §2</a>, <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">④ §12.4</a>, <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">§12.7</a></td><td>FairyWREN's nest packing; Nemo's group eviction</td></tr>
+        <tr><td><b>Index bits</b>: tags, partitions, Bloom filters</td><td>DRAM per object</td><td class="c"><a href="#s4">§4</a>, <a href="#s7">§7</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s5">③ §5</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s7">③ §7</a></td><td>Kangaroo 7.0 bits (tree node 1.4.1); Nemo 8.3 bits (tree node 1.7.6)</td></tr>
+        <tr><td><b>Cores</b>: nothing shared, I/O batched</td><td>Throughput, once the CPU is the limit</td><td class="c">—</td><td>KVell</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>OpenKache's public description fixes two of these rows: "a DRAM-resident index, NVMe-backed data", and an architecture that scales "across CPU cores with minimal sharing". The other rows are open questions about it. The first comes straight from §7: what does the DRAM-resident index hold, one entry per object, per set or per group, and how many bits per object at the object sizes it targets? <span class="src">openstd.com (2026-10-07)</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>Flash writes = ALWA × DLWA. Flashield keeps the log and cuts what is written; Kangaroo puts a small log before the sets; FairyWREN lets the cache do the SSD's garbage collection; Nemo fills whole set-groups before writing them. In every paper, track DRAM bits per object and WA at each layer.</p>
+</section>
+
+<section id="s9">
+  <div class="sec-head"><span class="n">§9</span><h2>When does each cost bite, and when does each design win?</h2><span class="tag t-what">main · read</span><span class="tag t-his">문제 · when</span></div>
+  <div class="figure" id="fig-when">
+    <div class="scroll">
+      <svg viewBox="0 0 760 618" width="760" role="img" aria-label="Three panels. One: on log scales, the DRAM bill of a map with 15 bytes per object falls from over 100 percent of the flash bill at 100-byte objects to a few percent at 2 KB, while filters at 3 bits per object stay under 4 percent; CacheLib splits at 2 KB. Two: QLC flash kept ten years allows under 0.37 drive writes per day, while Kangaroo measured 1.46. Three: the share of each set write that is new data: 2.4 percent for a plain set cache, at least 4.9 for Kangaroo, about 7 for FairyWREN as Nemo measured it, and about 89 for Nemo">
+        <text x="16" y="20" font-size="12" class="ink" font-weight="600">① When is a map entry per object too expensive? When objects are small.</text>
+        <rect x="92" y="40" width="620" height="196" class="surf" rx="0"/>
+        <path d="M92 40.0 H712" class="ln" stroke-dasharray="2 3"/>
+        <text x="46" y="44.0" font-size="10" class="mono mut">1000%</text>
+        <path d="M92 89.0 H712" class="ln" stroke-dasharray="2 3"/>
+        <text x="46" y="93.0" font-size="10" class="mono mut">100%</text>
+        <path d="M92 138.0 H712" class="ln" stroke-dasharray="2 3"/>
+        <text x="46" y="142.0" font-size="10" class="mono mut">10%</text>
+        <path d="M92 187.0 H712" class="ln" stroke-dasharray="2 3"/>
+        <text x="46" y="191.0" font-size="10" class="mono mut">1%</text>
+        <path d="M92 236.0 H712" class="ln" stroke-dasharray="2 3"/>
+        <text x="46" y="240.0" font-size="10" class="mono mut">0.1%</text>
+        <text x="78.0" y="252" font-size="10" class="mono mut">10 B</text>
+        <text x="284.66666666666663" y="252" font-size="10" class="mono mut">100 B</text>
+        <text x="491.3333333333333" y="252" font-size="10" class="mono mut">1 KB</text>
+        <text x="698.0" y="252" font-size="10" class="mono mut">10 KB</text>
+        <text x="6" y="34" font-size="10" class="mut">DRAM bill ÷ flash bill</text>
+        <text x="592" y="266" font-size="10" class="mut">object size (log scale)</text>
+        <path d="M92 89.0 H712" style="stroke:var(--stop);stroke-width:1" />
+        <text x="350" y="84.0" font-size="10" class="stp">here the map costs as much as the flash</text>
+        <polyline points="133.3,41.2 143.7,43.6 154.0,46.1 164.3,48.5 174.7,51.0 185.0,53.4 195.3,55.9 205.7,58.3 216.0,60.8 226.3,63.2 236.7,65.7 247.0,68.1 257.3,70.6 267.7,73.0 278.0,75.5 288.3,77.9 298.7,80.4 309.0,82.8 319.3,85.3 329.7,87.7 340.0,90.2 350.3,92.6 360.7,95.1 371.0,97.5 381.3,100.0 391.7,102.4 402.0,104.9 412.3,107.3 422.7,109.8 433.0,112.2 443.3,114.7 453.7,117.1 464.0,119.6 474.3,122.0 484.7,124.5 495.0,126.9 505.3,129.4 515.7,131.8 526.0,134.3 536.3,136.7 546.7,139.2 557.0,141.6 567.3,144.1 577.7,146.5 588.0,149.0 598.3,151.4 608.7,153.9 619.0,156.3 629.3,158.8 639.7,161.2 650.0,163.7 660.3,166.1 670.7,168.6 681.0,171.0 691.3,173.5 701.7,175.9 712.0,178.4" style="fill:none;stroke:var(--stop);stroke-width:2.2"/>
+        <polyline points="92.0,109.9 102.3,112.3 112.7,114.8 123.0,117.2 133.3,119.7 143.7,122.1 154.0,124.6 164.3,127.0 174.7,129.5 185.0,131.9 195.3,134.4 205.7,136.8 216.0,139.3 226.3,141.7 236.7,144.2 247.0,146.6 257.3,149.1 267.7,151.5 278.0,154.0 288.3,156.4 298.7,158.9 309.0,161.3 319.3,163.8 329.7,166.2 340.0,168.7 350.3,171.1 360.7,173.6 371.0,176.0 381.3,178.5 391.7,180.9 402.0,183.4 412.3,185.8 422.7,188.3 433.0,190.7 443.3,193.2 453.7,195.6 464.0,198.1 474.3,200.5 484.7,203.0 495.0,205.4 505.3,207.9 515.7,210.3 526.0,212.8 536.3,215.2 546.7,217.7 557.0,220.1 567.3,222.6 577.7,225.0 588.0,227.5 598.3,229.9 608.7,232.4 619.0,234.8" style="fill:none;stroke:var(--accent);stroke-width:2.2"/>
+        <path d="M92 187.0 H712" style="stroke:var(--ink-2);stroke-width:1;stroke-dasharray:6 3"/>
+        <text x="98" y="182.0" font-size="10" class="ink2">the SSD’s own page map, ≈ 1%</text>
+        <text x="184.4126598107253" y="45.282271842040366" font-size="10.5" class="stp" font-weight="600">a log’s map, 15 B per object</text>
+        <text x="100" y="101.87246788134178" font-size="10.5" class="acc" font-weight="600">sets: filters only, 3 bits</text>
+        <path d="M199.2 224 V236" style="stroke:var(--amber);stroke-width:2"/>
+        <text x="187.15954757476342" y="220" font-size="9" class="mono amb">33 B</text>
+        <path d="M298.7 224 V236" style="stroke:var(--amber);stroke-width:2"/>
+        <text x="286.66666666666663" y="220" font-size="9" class="mono amb">100 B</text>
+        <path d="M397.3 224 V236" style="stroke:var(--amber);stroke-width:2"/>
+        <text x="385.271725975397" y="220" font-size="9" class="mono amb">300 B</text>
+        <path d="M473.3 224 V236" style="stroke:var(--amber);stroke-width:2"/>
+        <text x="461.3202616029464" y="220" font-size="9" class="mono amb">700 B</text>
+        <path d="M569.7 32 V236" style="stroke:var(--violet);stroke-width:1.6"/>
+        <text x="573.6748568094506" y="42" font-size="10" class="vio" font-weight="600">CacheLib’s split: 2 KB</text>
+        <text x="573.6748568094506" y="56" font-size="10" class="vio">above: a log with a full map</text>
+        <text x="573.6748568094506" y="70" font-size="10" class="vio">below: sets with filters</text>
+        <text x="98" y="204" font-size="9.5" class="amb">amber ticks: the object sizes of Fig. 2</text>
+        <path d="M16 270 H744" class="ln"/>
+        <text x="16" y="292" font-size="12" class="ink" font-weight="600">② When do writes become the limit? When the flash is dense and must last.</text>
+        <text x="16" y="324" font-size="11" class="ink">QLC flash, 10 years: allowed</text>
+        <rect x="232" y="310" width="79" height="18" rx="3" class="accs"/>
+        <text x="318.625" y="324" font-size="10.5" class="ink2">&lt; 0.37 drive writes per day</text>
+        <text x="16" y="350" font-size="11" class="ink">PLC flash, 10 years: allowed</text>
+        <rect x="232" y="336" width="34" height="18" rx="3" class="accs"/>
+        <text x="274.0" y="350" font-size="10.5" class="ink2">&lt; 0.16</text>
+        <text x="16" y="376" font-size="11" class="ink">Kangaroo, measured by FairyWREN</text>
+        <rect x="232" y="362" width="310" height="18" rx="3" class="stps"/>
+        <text x="550.25" y="376" font-size="10.5" class="stp">1.46: about 4× the QLC budget</text>
+        <text x="16" y="396" font-size="10.5" class="ink2">More bits per cell put more data on the same silicon, with less carbon per bit, but each cell survives fewer erases.</text>
+        <text x="16" y="412" font-size="10.5" class="ink2">A 2 TB QLC drive kept six years allows the application only 14 MB/s, 0.09% of its write bandwidth. FairyWREN §1, §3.3</text>
+        <path d="M16 420 H744" class="ln"/>
+        <text x="16" y="442" font-size="12" class="ink" font-weight="600">③ When is a flash write worth making? When it carries enough new data.</text>
+        <text x="16" y="458" font-size="10.5" class="mut">the share of each set write that is new objects; the rest rewrites what was already there</text>
+        <text x="16" y="486" font-size="11" class="ink">a plain set cache: one new object</text>
+        <rect x="234" y="472" width="500" height="18" rx="3" class="surf"/>
+        <rect x="234" y="472" width="12.2" height="18" rx="3" class="stps"/>
+        <text x="254.20703125" y="486" font-size="10.5" class="ink">≈ 2.4%  (ALWA ≈ 40)</text>
+        <text x="16" y="512" font-size="11" class="ink">Kangaroo, threshold n = 2</text>
+        <rect x="234" y="498" width="500" height="18" rx="3" class="surf"/>
+        <rect x="234" y="498" width="24.4" height="18" rx="3" class="ambs"/>
+        <text x="266.4140625" y="512" font-size="10.5" class="ink">≥ 4.9%: at least 2 objects</text>
+        <text x="16" y="538" font-size="11" class="ink">FairyWREN, as Nemo measured it</text>
+        <rect x="234" y="524" width="500" height="18" rx="3" class="surf"/>
+        <rect x="234" y="524" width="35.0" height="18" rx="3" class="ambs"/>
+        <text x="277.0" y="538" font-size="10.5" class="ink">≈ 7%</text>
+        <text x="16" y="564" font-size="11" class="ink">Nemo: groups filled in DRAM</text>
+        <rect x="234" y="550" width="500" height="18" rx="3" class="surf"/>
+        <rect x="234" y="550" width="445.0" height="18" rx="3" class="accs"/>
+        <text x="244" y="564" font-size="10.5" class="ink">≈ 89%</text>
+        <text x="16" y="588" font-size="10.5" class="ink2">Kangaroo §1: admit to a set “only when the flash write is sufficiently amortized”; n = 2 cut flash writes 32.0% for 6.9% more misses (§5.4).</text>
+        <text x="16" y="604" font-size="9.5" class="mono mut">Nemo §1: set fill “≈7.0%” for FairyWREN, raised “to over 89%” (89.34%, §4.2)</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 10. Three whens. ① The formula of Figure 8, plotted against object size: a full map per object costs more than the flash below about 150 B and a few percent above 2 KB, which is where CacheLib switches from sets to a log. ② Dense flash wears out sooner, so the write budget, not DRAM, becomes the limit. ③ The papers' common answer to ②: write a set only when much of it is new. Panel ① and the shares in ③ are my arithmetic on the papers' numbers; the rest is quoted.</p>
+  </div>
+  <p>§7's formula depends on the object size, so Figure 10 ① plots it. A map with 15 bytes per object costs as much DRAM as the flash it maps at objects of about 150 bytes, about 7% at 2 KB, and under 1% only above about 15 KB. Filters at 3 bits per object stay under 4% even at 100 bytes. CacheLib draws its line at 2 KB for this reason. Above it, "the number of unique objects in a LOC will only number in the millions. It is therefore feasible to keep an in-memory index". Below it, "billions of small objects can fit on a single 1TB flash device", and "an exact lookup index … would use an unreasonably large amount of DRAM". So its large-object cache (LOC) keeps a full map, and its small-object cache (SOC) is sets with filters. <span class="src">CacheLib §4.2 · arithmetic on Nemo §2.3</span></p>
+  <p>Writes become the limit when the flash is dense and must last (②). Packing more bits into each cell puts more data on the same silicon, with less carbon per bit, but each cell survives fewer erases. FairyWREN computes that a 2 TB QLC drive kept for six years allows the application only 14 MB/s, 0.09% of the drive's write bandwidth, and that for ten years QLC allows fewer than 0.37 drive writes per day, while Kangaroo, in FairyWREN's evaluation, performs 1.46: about four times the budget. On such flash, writes decide, not DRAM. <span class="src">FairyWREN §1 and §3.3, Fig. 4</span></p>
+  <p>The papers' common answer is about when to write at all: a flash write is worth making only when much of it is new (③). A plain set cache writes 4 KB to add 100 bytes, 2.4% new. Kangaroo admits to a set "only when there are enough hash collisions — i.e., only when the flash write is sufficiently amortized"; with a threshold of 2, that cut flash writes by 32.0% for 6.9% more misses. Nemo measured FairyWREN's sets at about 7% new when written, and fills its own set-groups to 89.34% before writing them. <span class="src">Kangaroo §1 and §5.4 · Nemo §1 and §4.2</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>A per-object map is the limit when objects are small: below 2 KB, CacheLib switches to sets. Writes are the limit when flash is dense and must last years: QLC allows under 0.37 drive writes per day. The papers' answer to both is to write a set only when most of it is new.</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>What this page settled</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>IMPORTANCE</th><th>CLAIM</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td class="c">★ core</td><td>Page ③'s FTL map is the drive's, keyed by page number, 0.1% of the data. A flash cache is asked by key, so it keeps a second map, key → page, in the server's DRAM; with ~100 B objects that map costs more DRAM than the flash it points into. Page ③'s trade, one layer up, with a 40× smaller unit and write amplification that multiplies.</td><td class="c"><a href="#s0">§0</a></td></tr>
+        <tr><td class="c">★ core</td><td>The cache is asked by key, the SSD by page number; objects of ~100 B are packed ~40 to a page, so the cache's map needs one entry per object.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">main</td><td>Log-structured cache: write every object at the end, so a DRAM row per object says where it went. Cheap writes, costly DRAM.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">main</td><td>Set-associative cache: each object may live only in the page its key hashes to, so no map; one small insert rewrites the whole 4 KB page. Cheap DRAM, costly writes.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">main</td><td>Bloom filter: a few DRAM bits per key say "certainly not here" or "maybe", so a set is read only on "maybe".</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td class="c">main</td><td>Kangaroo: a 5% indexed log gathers objects for the same set in front of a 95% set area; 7.0 bits, ALWA 5.8.</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td class="c">main</td><td>The sources behind §0's step ②: DRAM costs ~10× flash per byte, draws power and is fixed per server; only the map stays in it.</td><td class="c"><a href="#s6">§6</a></td></tr>
+        <tr><td class="c">★ core</td><td>index ÷ data = entry ÷ object; DRAM bill ÷ flash bill ≈ 10 × that: 1% for the page map, ≥ 150% for a 15 B map of 100 B objects.</td><td class="c"><a href="#s7">§7</a></td></tr>
+        <tr><td class="c">★ core</td><td>Flash writes = ALWA × DLWA; Flashield → Kangaroo → FairyWREN → Nemo each fix the last design's leftover; KVell is the CPU axis.</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td class="c">main</td><td>Small objects: the map is the limit (CacheLib's 2 KB split). Dense flash: writes are the limit. Write a set only when most of it is new.</td><td class="c"><a href="#s9">§9</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="said">
+  <div class="sec-head"><h2>What you said</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>YOUR WORDS</th><th>ANSWERED IN</th></tr></thead>
+      <tbody>
+        <tr><td>"100B objects 가 갑자기 어이가 없고"</td><td class="c"><a href="#s1">§1</a>, Fig. 2</td></tr>
+        <tr><td>"어차피 ssd는 4kb page당하는거 아니야? 뭘 더 빠르게 할려고 다르게 하는게 있는거야 ?"</td><td class="c"><a href="#s1">§1</a>, Fig. 1</td></tr>
+        <tr><td>"set associative랑 kangaroo 가 뭔 문맥이고"</td><td class="c"><a href="#s3">§3</a>, <a href="#s5">§5</a></td></tr>
+        <tr><td>"앞단에 저거 불룸필터랑, kangaroo 랑 log-structrred cache 에 대한 brief 설명이 있꼬"</td><td class="c"><a href="#s4">§4</a>, <a href="#s5">§5</a>, <a href="#s2">§2</a></td></tr>
+        <tr><td>"set assoicative랑 log-structured 도 간략하겐 설명해야될듯"</td><td class="c"><a href="#s3">§3</a>, <a href="#s2">§2</a></td></tr>
+        <tr><td>"용어 설명이 아니라, 간단한 개념 ? 간단하겐 못설명하나 ? 60-70점스케일로" · "그 log랑 setassoative 에관해서 말하는거야"</td><td class="c"><a href="#s2">§2</a>, <a href="#s3">§3</a>: "The idea", Figs. 3–4</td></tr>
+        <tr><td>"dram 이 왜 cost가 될 수 있는지도 포인트면 역어서 해야될거 같아 인지가 안됨"</td><td class="c"><a href="#s0">§0</a> ②, <a href="#s6">§6</a></td></tr>
+        <tr><td>"이 사진은 뭘 설명할려는거? 여기 부분 갑자기 등장해서 뭔가 뭐 설명할려는지 모르겠녜"</td><td class="c"><a href="#s7">§7</a>, Fig. 8</td></tr>
+        <tr><td>"문제 제시하고 열로 왓어야 되는거 아닌가?"</td><td class="c"><a href="#s0">§0</a>, <a href="#s6">§6</a>–<a href="#s9">§9</a></td></tr>
+        <tr><td>"10절 이랑 문제 왜 어떤걸 how when 이런거 다풀어서"</td><td class="c"><a href="#s0">§0</a> 왜 · <a href="#s7">§7</a> 어떤걸 · <a href="#s8">§8</a> how · <a href="#s9">§9</a> when</td></tr>
+        <tr><td>"이게 뭘 설명할려는거지? hard disk rebuilt 3.5장인데?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
+        <tr><td>"3장에서 FTL 이 가비지 콜렉션이랑, dram map 이 필요하다 , 그런거랑, index cost 나 그런걸 이야기를 다하고 왓짢아? 그런데 3.5 장은 어떤 문제를 다시 시작하는거냐고" · "뭘 풀려한거고, 그래서 paper 로 왜 연결되는거냐"</td><td class="c"><a href="#s0">§0</a>, Figs. 0a–0b</td></tr>
+        <tr><td>"여기서 dram cache는 ssd's FtL map 이 아닌거잖아 컨트롤러가, 그리고 그 문맥을 앞단에 넣어야되는거 아니야? , 그걸로 문제로 시작해야도니ㅡㄴ거 아닌가?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
+        <tr><td>"근데 그림에서 dram 은 page를 알순 없지 않나? 로지컬 addr 정도 알 수 있는거 아닌가? FTL 만 변환 알 수 잇는거 아닌가? 그걸 연결하는 작업 까지 코딩으로 하는거야 ?"</td><td class="c">Fig. 1, <a href="#s0">§0</a> (two owners)</td></tr>
+        <tr><td>"그럼 알수가 없는데 매핑을 어케해 ?" · "이 그림은 모르는거 ?" · "여기서 logical 은 LBA 말하는건가" · "LBA 도 헷갈리는데 , 그리고 , Lba 살짝 리뷰하는 그런 정의나 그런거 까지 살짝 문맥넣어서 그림에"</td><td class="c">Fig. 1 (write arrow, the SSD's promise, the LBA panel), <a href="#s0">§0</a></td></tr>
+        <tr><td>"FTL의 garbage collection 이랑 map 을 방금 배우고 왓는데, 또 다른거 이야기하니까 , 저문맥을하는건지, 그 혼동도 풀고, 문제자체에 도 문맥을담아서"</td><td class="c"><a href="#s0">§0</a>, Fig. 0b</td></tr>
+        <tr><td>"큰 database에서는 100byte object의 수 milion cache 가 필요하고, dram 감당안되서 ssd 여야되는데, 그거에 대한 map 파일을 하는것만으로도 data의 15%가량을 dram 에 해야되서 코스트를 너무 많이 잡아먹는다는게 핵심인거지 ?"</td><td class="c">Fig. 0a, <a href="#s0">§0</a> CARRY, <a href="#s7">§7</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="papers-map">
+  <div class="sec-head"><h2>The papers' background, section by section</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAPER SECTION</th><th>WHAT IT HOLDS</th><th>HERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Kangaroo §2.1, §3, abstract · Flashield §1, Table 1</b></td><td>The problem: tiny objects, DRAM's price, the move to flash, few bits per object</td><td class="c"><a href="#s0">§0</a></td></tr>
+        <tr><td><b>Kangaroo §2.1</b></td><td>Tiny objects: Facebook, Twitter, Azure</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td><b>Kangaroo §3 · CacheLib §4.2</b></td><td>The read path: DRAM cache, then flash</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
+        <tr><td><b>Kangaroo §2.3, §4.2 · Nemo §2.3</b></td><td>Log-structured caches and their index rows</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td><b>Kangaroo §2.3 · CacheLib §4.2</b></td><td>Set-associative caches, 40× ALWA</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td><b>CacheLib §4.2, Figs. 10–11</b></td><td>A Bloom filter per set</td><td class="c"><a href="#s4">§4</a></td></tr>
+        <tr><td><b>Kangaroo §3, §4.3, Table 1</b></td><td>KLog, KSet, the threshold</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td><b>Flashield §1, Table 1 · FairyWREN §2 · Kangaroo §2.2, abstract</b></td><td>Why DRAM is the cost</td><td class="c"><a href="#s6">§6</a></td></tr>
+        <tr><td><b>Nemo §2.3 · Kangaroo §2.3, Fig. 1</b></td><td>Bits per object; 75 GB for 2 TB</td><td class="c"><a href="#s7">§7</a></td></tr>
+        <tr><td><b>Kangaroo §2.2 · FairyWREN §3.3 · CacheLib §5.2 · each paper's §1</b></td><td>ALWA × DLWA; what each design leaves</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td><b>CacheLib §4.2 · FairyWREN §1, §3.3 · Kangaroo §1, §5.4 · Nemo §1, §4.2</b></td><td>The 2 KB split; write budgets; fill before writing</td><td class="c"><a href="#s9">§9</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="series">
+  <div class="sec-head"><h2>The series</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAGE</th><th>IMPORTANCE</th><th>QUESTION IT ANSWERS</th><th>STANDS IN FOR</th></tr></thead>
+      <tbody>
+        <tr><td><a href="2026-10-08-storage-1-hard-disk-rebuilt.html"><b>① The hard disk</b></a></td><td class="c">main</td><td>Why is random access slow, and what is the OS promised?</td><td>OSTEP 37.1–37.4</td></tr>
+        <tr><td><a href="2026-10-08-storage-2-flash-and-ftl.html"><b>② Flash and the FTL</b></a></td><td class="c">★ core</td><td>What can a flash chip not do, and how does the SSD still look like a disk?</td><td>OSTEP 44.1–44.7</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-garbage-and-write-amplification.html"><b>③ Garbage and write amplification</b></a></td><td class="c">★ core</td><td>What does never overwriting cost, and how is the cost kept down?</td><td>OSTEP 44.8–44.12</td></tr>
+        <tr><td><b>3.5 Flash caches</b> (here)</td><td class="c">★ core</td><td>How does a cache find a tiny object on flash, and why does that cost DRAM?</td><td>the papers' background sections</td></tr>
+        <tr><td><a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a></td><td class="c">main</td><td>How does a file system write only sequentially, and still find its data?</td><td>OSTEP 43</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="words">
+  <div class="sec-head"><h2>The papers' words, on these pages</h2></div>
+  <p>The papers use these words without defining them. Each row gives the meaning and where this series built it.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAPER WORD</th><th>MEANING</th><th>BUILT IN</th></tr></thead>
+      <tbody>
+        <tr><td><b>key · object</b></td><td>The name a read asks for; the value stored under it, often under 1 KB.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td><b>log-structured cache · index · tag</b></td><td>A cache that appends objects and keeps one DRAM row per object; the row's few bits of the key's hash that tell keys apart without reading flash.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td><b>set · set-associative</b></td><td>The one 4 KB page a key's hash picks; the cache that places objects that way.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td><b>Bloom filter · probe · false positive</b></td><td>A few bits per key that answer "certainly absent" or "maybe present"; one bit position checked; a "maybe" that was wrong.</td><td class="c"><a href="#s4">§4</a>, tree nodes 1.6 and 1.6.1</td></tr>
+        <tr><td><b>KLog · KSet · threshold</b></td><td>Kangaroo's small indexed log and large set area; the least number of objects a set write must carry.</td><td class="c"><a href="#s5">§5</a></td></tr>
+        <tr><td><b>LOC · SOC</b></td><td>CacheLib's large-object cache (objects of 2 KB and up, a full DRAM index) and small-object cache (sets).</td><td class="c"><a href="#s9">§9</a></td></tr>
+        <tr><td><b>set-group</b></td><td>Nemo's unit: many sets filled together in DRAM, then written and evicted whole.</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td><b>ALWA · DLWA</b></td><td>Bytes the cache sends ÷ bytes of new objects; flash bytes programmed ÷ bytes the host sent. They multiply.</td><td class="c"><a href="#s8">§8</a>, <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">③ §3</a></td></tr>
+        <tr><td><b>CLWA</b></td><td>Cache-level write amplification: a cache rewriting objects it wants to keep (Flashield §1).</td><td class="c"><a href="2026-10-08-storage-4-log-structured-file-system.html#s12">④ §12.4</a></td></tr>
+        <tr><td><b>admission</b></td><td>The choice of whether an object is written to flash at all.</td><td class="c"><a href="#s8">§8</a>, tree node 1.4.2</td></tr>
+        <tr><td><b>erase block · erase unit (EU) · zone · reclaim unit</b></td><td>The unit erased at once. Drives stripe many blocks together, so the effective unit is MB to GB (FairyWREN §3.1); a zone (ZNS) and a reclaim unit (FDP) are erase units handed to the host.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s2">② §2</a></td></tr>
+        <tr><td><b>active EU</b></td><td>An erase unit still being filled; the drive buffers each one, so only a few may be open, often fewer than ten (FairyWREN §4.3).</td><td class="c"><a href="2026-10-08-storage-4-log-structured-file-system.html#s12">④ §12.2</a></td></tr>
+        <tr><td><b>cleaning · garbage collection</b></td><td>Copy a unit's live data out, then erase it.</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s2">③ §2</a></td></tr>
+        <tr><td><b>utilization · over-provisioning (OP)</b></td><td>The share of flash holding data; the share kept free so that GC finds dead pages.</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">③ §4</a></td></tr>
+        <tr><td><b>DWPD</b> (drive writes per day)</td><td>How many times a day the drive's capacity may be written: the erase budget spread over the years it must last.</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s3">③ §3</a>, <a href="#s9">§9</a></td></tr>
+        <tr><td><b>LBA · LBAD</b></td><td>A logical block address; a drive that offers only read and write of logical blocks, like a disk, and hides its erases (FairyWREN §4.1).</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s5">② §5</a></td></tr>
+        <tr><td><b>WREN · ZNS · FDP</b></td><td>Interfaces that let the host choose the erase unit for its data and erase it itself; ZNS and FDP are NVMe standards (FairyWREN §4.3).</td><td class="c"><a href="#s8">§8</a></td></tr>
+        <tr><td><b>trim · Erase</b></td><td>Trim tells the drive single pages are unused; WREN's Erase wipes a whole erase unit, after the host has moved what it wants to keep (FairyWREN §4.3).</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s4">③ §4</a></td></tr>
+        <tr><td><b>segment</b></td><td>The large unit a log writes at once, buffered in DRAM until full.</td><td class="c"><a href="#s2">§2</a>, <a href="2026-10-08-storage-4-log-structured-file-system.html#s2">④ §2</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="legend">
+  <div class="sec-head"><h2>Figure marks</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>MARK</th><th>MEANING</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Colors</b></td><td>Violet = what lives in the server's DRAM (the cache's map, filters); amber = objects on flash; teal = the SSD's own layer, or a cost kept low; red = a cost.</td><td class="c">all</td></tr>
+        <tr><td><b>① ② ③ in circles</b></td><td>Steps the prose walks in order.</td><td class="c">all</td></tr>
+        <tr><td><b>Dashed frames</b></td><td>Where a thing physically lives: the server's main memory, or the SSD.</td><td class="c"><a href="#fig-stack">F1</a></td></tr>
+        <tr><td><b>Red text</b></td><td>What is new on this page against page ③.</td><td class="c"><a href="#fig-vs3">F0b</a></td></tr>
+        <tr><td><b>tree chips</b></td><td>Open the lecture tree, where each paper has its own node.</td><td class="c"><a href="#fig-bloom">F5</a>, <a href="#fig-kangaroo">F6</a>, <a href="#fig-papers">F9</a></td></tr>
+        <tr><td><b>Outlined bits</b></td><td>The 4 positions a lookup checks: teal = 1, red = 0.</td><td class="c"><a href="#fig-bloom">F5</a></td></tr>
+        <tr><td><b>Amber ticks</b></td><td>The object sizes of Figure 2, on Figure 10's size axis.</td><td class="c"><a href="#fig-when">F10</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>Leaves out · assumes · next</h2></div>
+  <p><b>Leaves out.</b> Each paper's own machinery: Kangaroo's partitioned index and RRIParoo eviction, FairyWREN's nest packing in detail, Nemo's filter groups and hotness tracking, Flashield's classifier: the tree's 1.7 nodes. Bloom filter false-positive arithmetic: tree node 1.6.1. Admission policies: tree node 1.4.2. How eviction relates to LFS cleaning: <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">page ④ §12</a>.</p>
+  <p><b>Assumes.</b> Pages ② and ③: the page and the erase block, the log-structured FTL and its map, block and hybrid mapping, garbage collection, WA = 1/(1−u), and overprovisioning. A hash function, only as "a key in, a well-spread number out".</p>
+  <p><b>Next.</b> <a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a>: page ②'s log one layer up, on a hard disk; its <a href="2026-10-08-storage-4-log-structured-file-system.html#s12">§12</a> lines the papers' caches up with LFS.</p>
+</section>
+
+</div>

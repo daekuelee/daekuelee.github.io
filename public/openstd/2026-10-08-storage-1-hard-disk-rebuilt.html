@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hard disk rebuilt</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+
+<div class="wrap">
+<div class="pub-note" style="margin:0 0 18px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font-size:.86rem;line-height:1.6"><a href="index.html">← 공부 방식 페이지로</a><br>이 페이지는 제 공부 노트입니다 (2026-10-08 – 10-11). 본문과 그림은 AI(Claude)와 함께 만들었고, 막힌 곳은 제 질문으로 다시 고쳤습니다. 영상 장면은 저작권 때문에 싣지 않고 YouTube 링크로 두었습니다. “tree node” 는 공개하지 않은 공부 지도의 쪽 번호입니다.</div>
+
+<nav class="crumbs" aria-label="short lecture series">
+  <span>쇼츠 강의</span><span>›</span><span>Storage: OSTEP 37 → 44 → 43</span>
+  <span class="sp"><b style="color:var(--ink)">① Hard disk</b> · <a href="2026-10-08-storage-2-flash-and-ftl.html">② Flash + FTL ★</a> · <a href="2026-10-08-storage-3-garbage-and-write-amplification.html">③ Garbage + WA ★</a> · <a href="2026-10-08-storage-3-5-flash-caches.html">3.5 Flash cache ★</a> · <a href="2026-10-08-storage-4-log-structured-file-system.html">④ LFS</a> · <a href="https://www.youtube.com/watch?v=5Mh3o886qpg">▶ Video (YouTube)</a></span>
+</nav>
+
+<header>
+  <div class="eyebrow">Short lecture · 2026-10-08 · page ① of 4 · importance: main (a refresh) · stands in for the parts of OSTEP 37 that 44 and 43 use</div>
+  <h1>① The hard disk, rebuilt: why moving metal sets the rules</h1>
+  <p class="subtitle">Chapters 44 and 43 both answer the hard disk. Chapter 44 asks what changes when nothing moves; chapter 43 asks how a file system should write when moving the arm is the expensive part. Both lean on two facts rebuilt here: a small random access is slow because metal must move first, and the OS sees only a numbered array of sectors, each fixed to one spot.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read · skim = the figure and the CARRY line at the end of the section are enough.</p>
+</header>
+
+<section id="s1">
+  <div class="sec-head"><span class="n">§1</span><h2>What is inside a hard disk, and what has to move?</h2><span class="tag t-what">main · read</span></div>
+
+  <div class="figure" id="fig-photo">
+    <div class="scroll">
+      <svg viewBox="0 0 960 734" width="100%" style="min-width:560px" role="img" aria-label="A laptop hard disk with its lid removed, with the platter, spindle, head, arm, actuator and connector labelled">
+        <image href="img/2026-10-08-hdd-laptop-open.jpg" x="0" y="0" width="960" height="734"/>
+        <path class="arr-a" d="M 300 62 L 428 180"/><circle cx="428" cy="180" r="6" class="accs"/>
+        <rect x="14" y="30" width="286" height="62" rx="6" class="surf"/>
+        <text x="28" y="56" font-size="22" class="ink" font-weight="600">Head</text>
+        <text x="28" y="82" font-size="18" class="ink2">at the arm's tip (parked on its ramp)</text>
+        <path class="arr-a" d="M 260 170 L 422 378"/><circle cx="422" cy="378" r="6" class="accs"/>
+        <rect x="14" y="130" width="246" height="62" rx="6" class="surf"/>
+        <text x="28" y="156" font-size="22" class="ink" font-weight="600">Spindle</text>
+        <text x="28" y="182" font-size="18" class="ink2">motor hub, constant speed</text>
+        <path class="arr-a" d="M 236 262 L 300 330"/><circle cx="300" cy="330" r="6" class="accs"/>
+        <rect x="14" y="232" width="222" height="62" rx="6" class="surf"/>
+        <text x="28" y="258" font-size="22" class="ink" font-weight="600">Platter</text>
+        <text x="28" y="284" font-size="18" class="ink2">magnetic surface</text>
+        <path class="arr-a" d="M 700 86 L 585 212"/><circle cx="585" cy="212" r="6" class="accs"/>
+        <rect x="640" y="16" width="306" height="70" rx="6" class="surf"/>
+        <text x="654" y="44" font-size="22" class="ink" font-weight="600">Arm</text>
+        <text x="654" y="72" font-size="18" class="ink2">swings to pick a track (seek)</text>
+        <path class="arr-a" d="M 800 470 L 790 290"/><circle cx="790" cy="290" r="6" class="accs"/>
+        <rect x="700" y="470" width="246" height="70" rx="6" class="surf"/>
+        <text x="714" y="498" font-size="22" class="ink" font-weight="600">Actuator</text>
+        <text x="714" y="526" font-size="18" class="ink2">voice-coil motor</text>
+        <path class="arr-a" d="M 120 650 L 150 530"/><circle cx="150" cy="530" r="6" class="accs"/>
+        <rect x="14" y="650" width="250" height="62" rx="6" class="surf"/>
+        <text x="28" y="676" font-size="22" class="ink" font-weight="600">Connector</text>
+        <text x="28" y="702" font-size="18" class="ink2">to the computer (SATA)</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 1. A 2.5-inch laptop hard disk with the lid off. The arm is resting on its parking ramp, so the head is off the platter. Photo: Evan-Amos, <a href="https://commons.wikimedia.org/wiki/File:Laptop-hard-drive-exposed.jpg">Wikimedia Commons</a>, <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>; labels added.</p>
+  </div>
+
+  <div class="figure" id="fig-tracks">
+    <div class="scroll">
+      <svg viewBox="0 0 760 452" width="760" role="img" aria-label="Left: one platter surface from above, with one ring highlighted as a track and one piece of it highlighted as a sector, and a head over the track. Right: a side view of two platters with four surfaces and four heads on one actuator. Bottom: the track unrolled into 512-byte sectors">
+        <circle cx="170" cy="170" r="150" class="surf"/>
+        <circle cx="170" cy="170" r="120" class="accs"/>
+        <circle cx="170" cy="170" r="100" class="surf" style="stroke:none"/>
+        <g class="ln"><circle cx="170" cy="170" r="140"/><circle cx="170" cy="170" r="120"/><circle cx="170" cy="170" r="100"/><circle cx="170" cy="170" r="80"/><circle cx="170" cy="170" r="60"/></g>
+        <g class="ln">
+          <path d="M170 130 L170 20"/><path d="M190 135.36 L245 40.1"/><path d="M204.64 150 L299.9 95"/><path d="M210 170 L320 170"/>
+          <path d="M204.64 190 L299.9 245"/><path d="M190 204.64 L245 299.9"/><path d="M170 210 L170 320"/><path d="M150 204.64 L95 299.9"/>
+          <path d="M135.36 190 L40.1 245"/><path d="M130 170 L20 170"/><path d="M135.36 150 L40.1 95"/><path d="M150 135.36 L95 40.1"/>
+        </g>
+        <path d="M290 170 A120 120 0 0 1 273.92 230 L256.6 220 A100 100 0 0 0 270 170 Z" class="ambs"/>
+        <circle cx="170" cy="170" r="40" class="surf"/>
+        <text x="170" y="174" font-size="11" class="mut" text-anchor="middle">spindle</text>
+        <path d="M330 322 L229 268" class="arr" stroke-width="5"/>
+        <rect x="219" y="259" width="14" height="12" style="fill:var(--ink)"/>
+        <path d="M247.8 92.2 L344 42" class="ln"/><circle cx="247.8" cy="92.2" r="3" class="accs"/>
+        <path d="M272 198 L344 112" class="ln"/><circle cx="272" cy="198" r="3" class="ambs"/>
+        <path d="M236 268 L344 182" class="ln"/>
+        <text x="350" y="40" font-size="13" class="acc" font-weight="600">① track</text>
+        <text x="350" y="57" font-size="12" class="ink2">one ring of data on the surface; hundreds of</text>
+        <text x="350" y="73" font-size="12" class="ink2">tracks fit across the width of a human hair</text>
+        <text x="350" y="110" font-size="13" class="amb" font-weight="600">② sector</text>
+        <text x="350" y="127" font-size="12" class="ink2">one 512-byte piece of a track: the smallest</text>
+        <text x="350" y="143" font-size="12" class="ink2">unit the drive reads or writes</text>
+        <text x="350" y="180" font-size="13" class="ink" font-weight="600">③ head</text>
+        <text x="350" y="197" font-size="12" class="ink2">sits over one track; as the platter turns, that</text>
+        <text x="350" y="213" font-size="12" class="ink2">track's sectors pass under it one by one</text>
+
+        <text x="350" y="240" font-size="13" class="ink" font-weight="600">④ side view: a surface is one side of a platter</text>
+        <rect x="420" y="250" width="16" height="84" class="surf"/>
+        <rect x="360" y="262" width="240" height="10" class="surf"/>
+        <rect x="360" y="306" width="240" height="10" class="surf"/>
+        <g font-size="10" class="ink2"><text x="446" y="258">top surface</text><text x="446" y="284">bottom surface</text><text x="446" y="302">top surface</text><text x="446" y="328">bottom surface</text></g>
+        <g style="fill:var(--ink)"><rect x="556" y="254" width="12" height="6"/><rect x="556" y="274" width="12" height="6"/><rect x="556" y="298" width="12" height="6"/><rect x="556" y="318" width="12" height="6"/></g>
+        <g class="ln"><path d="M568 257 L690 257"/><path d="M568 277 L690 277"/><path d="M568 301 L690 301"/><path d="M568 321 L690 321"/></g>
+        <rect x="690" y="248" width="14" height="82" class="ambs"/>
+        <text x="712" y="286" font-size="10" class="mut">actuator</text>
+        <text x="350" y="350" font-size="12" class="ink">2 platters = 4 surfaces = 4 heads, all on one actuator: they seek together</text>
+
+        <text x="20" y="372" font-size="13" class="ink" font-weight="600">⑤ the teal track, unrolled: sector after sector, 512 bytes each</text>
+        <g>
+          <rect x="20" y="382" width="58" height="28" class="accs"/><rect x="82" y="382" width="58" height="28" class="ambs"/><rect x="144" y="382" width="58" height="28" class="accs"/><rect x="206" y="382" width="58" height="28" class="accs"/><rect x="268" y="382" width="58" height="28" class="accs"/>
+          <rect x="330" y="382" width="58" height="28" class="accs"/><rect x="392" y="382" width="58" height="28" class="accs"/><rect x="454" y="382" width="58" height="28" class="accs"/><rect x="516" y="382" width="58" height="28" class="accs"/><rect x="578" y="382" width="58" height="28" class="accs"/>
+        </g>
+        <g font-size="10" class="mono ink" text-anchor="middle"><text x="49" y="400">512 B</text><text x="111" y="400">512 B</text><text x="173" y="400">512 B</text><text x="235" y="400">512 B</text><text x="297" y="400">512 B</text><text x="359" y="400">512 B</text><text x="421" y="400">512 B</text><text x="483" y="400">512 B</text><text x="545" y="400">512 B</text><text x="607" y="400">512 B</text></g>
+        <text x="650" y="400" font-size="14" class="mut">…</text>
+        <path d="M20 416 V424 H512 V416" class="arr" style="stroke:var(--violet)"/>
+        <text x="20" y="442" font-size="12" class="vio" font-weight="600">one 4 KB request = 8 sectors in a row: one seek, one rotation, then all 8 pass under the head</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 2. Where the tracks and sectors are; a photo cannot show them, because they are magnetic. Left: one surface from above, not to scale: the teal ring is one track, and the amber piece of it is one sector. Right: the same drive from the side. Each platter has a top and a bottom surface, and each surface has its own head. Bottom: the teal track cut open into a row of 512-byte sectors; the violet bracket is one 4 KB request, eight of them in a row.</p>
+  </div>
+
+
+  <p>A hard disk stores bits as tiny magnetized regions on a <b>platter</b>, a rigid disc coated with a thin magnetic layer (Figure 1). Both surfaces of a platter hold data. One or more platters are clamped to the <b>spindle</b>, a motor hub that turns them together at a constant rate, typically 7,200 to 15,000 rotations per minute (RPM). The rate never changes to suit a request: the platter keeps turning, and the drive waits for the data to come round. <span class="src">OSTEP 37.2</span></p>
+  <p>Data on a surface lies in concentric rings called <b>tracks</b>, and each track is cut into <b>sectors</b> of 512 bytes (Figure 2, ① ② ⑤). The sector is the smallest unit the drive reads or writes. A request is usually bigger: file systems read and write 4 KB at a time, which is eight sectors in a row (Figure 2, ⑤, violet). OSTEP's model uses 512-byte sectors, as this page does; drives made since about 2011 store 4,096-byte sectors physically (“Advanced Format”), and many still show the OS 512-byte ones. Tracks are packed so tightly that hundreds of them fit into the width of a human hair. <span class="src">OSTEP 37.1–37.2</span></p>
+  <p>A <b>head</b> reads by sensing the magnetization that passes under it and writes by changing it. There is one head per <b>surface</b>, and a surface is one side of a platter, so every platter has two heads, one above it and one below (Figure 2, ④). The heads ride on the <b>arm</b>, which an <b>actuator</b>, a voice-coil motor at the arm's pivot, swings across the surface (Figure 3). <span class="src">OSTEP 37.2</span></p>
+
+  <div class="figure" id="fig-closeup">
+    <div class="scroll">
+      <svg viewBox="0 0 960 640" width="100%" style="min-width:560px" role="img" aria-label="Close-up of a hard disk arm swinging over a platter, with the pivot, arm, head and platter labelled">
+        <image href="img/2026-10-08-hdd-arm-closeup.jpg" x="0" y="0" width="960" height="640"/>
+        <path class="arr-a" d="M 120 330 L 196 222"/><circle cx="196" cy="222" r="6" class="accs"/>
+        <rect x="14" y="330" width="230" height="62" rx="6" class="surf"/>
+        <text x="28" y="356" font-size="22" class="ink" font-weight="600">Pivot</text>
+        <text x="28" y="382" font-size="18" class="ink2">the arm turns about it</text>
+        <path class="arr-a" d="M 560 180 L 500 250"/><circle cx="500" cy="250" r="6" class="accs"/>
+        <rect x="400" y="118" width="190" height="62" rx="6" class="surf"/>
+        <text x="414" y="144" font-size="22" class="ink" font-weight="600">Arm</text>
+        <text x="414" y="170" font-size="18" class="ink2">one per surface</text>
+        <path class="arr-a" d="M 830 430 L 790 284"/><circle cx="790" cy="284" r="6" class="accs"/>
+        <rect x="640" y="430" width="306" height="62" rx="6" class="surf"/>
+        <text x="654" y="456" font-size="22" class="ink" font-weight="600">Head</text>
+        <text x="654" y="482" font-size="18" class="ink2">just above the spinning surface</text>
+        <path class="arr-a" d="M 330 60 L 420 110"/><circle cx="420" cy="110" r="6" class="accs"/>
+        <rect x="14" y="28" width="316" height="62" rx="6" class="surf"/>
+        <text x="28" y="54" font-size="22" class="ink" font-weight="600">Platter</text>
+        <text x="28" y="80" font-size="18" class="ink2">the head sweeps across it</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 3. The arm of a 3.5-inch drive over its platter. A seek is the arm turning about the pivot until the head sits over the wanted track. Photo: Matthew Field, <a href="https://commons.wikimedia.org/wiki/File:Hard_disk_platters_and_head.jpg">Wikimedia Commons</a>, <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>; labels added.</p>
+  </div>
+
+  <p>So two things move. The platter turns under the head, and the arm swings across the platter. Before a single byte can be read, the arm has to reach the right track and the right sector has to rotate under the head. That waiting is where the time goes, and §2 measures it.</p>
+  <p class="gist"><span class="lbl">CARRY</span>A hard disk is a spinning platter and a swinging arm. Every request waits for the two to line up before any byte moves.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="n">§2</span><h2>Where do the milliseconds of one request go?</h2><span class="tag t-ks">★ core · read every line</span></div>
+
+  <div class="figure" id="fig-track">
+    <div class="scroll">
+      <svg viewBox="0 0 760 392" width="760" role="img" aria-label="Top view of three tracks with a head seeking from the inner track to the outer track and waiting for sector 11 to rotate under it, next to two time bars">
+        <defs>
+          <marker id="h1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="acc"/></marker>
+          <marker id="h1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="amb"/></marker>
+        </defs>
+        <circle cx="170" cy="168" r="150" class="surf"/>
+        <circle cx="170" cy="168" r="114" class="ln"/>
+        <circle cx="170" cy="168" r="78" class="ln"/>
+        <circle cx="170" cy="168" r="46" class="surf"/>
+        <g class="ln">
+          <path d="M170 122 L170 18"/><path d="M193 128.2 L245 38.1"/><path d="M209.8 145 L299.9 93"/><path d="M216 168 L320 168"/>
+          <path d="M209.8 191 L299.9 243"/><path d="M193 207.8 L245 297.9"/><path d="M170 214 L170 318"/><path d="M147 207.8 L95 297.9"/>
+          <path d="M130.2 191 L40.1 243"/><path d="M124 168 L20 168"/><path d="M130.2 145 L40.1 93"/><path d="M147 128.2 L95 38.1"/>
+        </g>
+        <path d="M 95 38.1 A 150 150 0 0 1 170 18 L 170 54 A 114 114 0 0 0 113 69.3 Z" class="vios"/>
+        <g font-size="12" class="mono ink2" text-anchor="middle">
+          <text x="204" y="45">0</text><text x="263" y="79">1</text><text x="297" y="138">2</text><text x="297" y="206">3</text>
+          <text x="263" y="265">4</text><text x="204" y="300">5</text><text x="136" y="300">6</text><text x="77" y="265">7</text>
+          <text x="43" y="206">8</text><text x="43" y="138">9</text><text x="77" y="79">10</text><text x="136" y="45" class="vio" font-weight="600">11</text>
+        </g>
+        <text x="170" y="172" font-size="11" class="mut" text-anchor="middle">spindle</text>
+        <text x="170" y="111" font-size="10" class="mono mut" text-anchor="middle">inner 24–35</text>
+        <text x="170" y="77" font-size="10" class="mono mut" text-anchor="middle">middle 12–23</text>
+        <text x="170" y="313" font-size="10" class="mono mut" text-anchor="middle">outer 0–11</text>
+        <path d="M 372 312 L 232 168" class="arr" stroke-width="5" opacity=".35"/>
+        <path d="M 372 312 L 304 168" class="arr" stroke-width="5"/>
+        <rect x="225" y="161" width="14" height="14" class="surf" opacity=".6"/>
+        <rect x="297" y="161" width="15" height="15" class="ambs"/>
+        <path d="M 242 168 L 292 168" class="arr-a" marker-end="url(#h1a)"/>
+        <text x="258" y="160" font-size="13" class="acc" font-weight="600">①</text>
+        <path d="M 129 15 A 158 158 0 1 0 328 168" class="arr-s" style="stroke:var(--amber)" marker-end="url(#h1b)"/>
+        <text x="30" y="306" font-size="13" class="amb" font-weight="600">②</text>
+        <text x="316" y="156" font-size="13" class="ink" font-weight="600">③</text>
+        <text x="8" y="346" font-size="12" class="acc" font-weight="600">① seek — the arm swings from the inner track to the outer one</text>
+        <text x="8" y="364" font-size="12" class="amb" font-weight="600">② rotation — wait for sector 11 to come round to the head</text>
+        <text x="8" y="382" font-size="12" class="ink" font-weight="600">③ transfer — read sector 11 as it passes under the head</text>
+
+        <text x="400" y="40" font-size="13" class="ink" font-weight="600">Random 4 KB read · Cheetah 15K.5</text>
+        <text x="400" y="56" font-size="11" class="mut">T ≈ 4 + 2 + 0.03 ≈ 6.03 ms → 4 KB / 6 ms ≈ 0.66 MB/s</text>
+        <rect x="400" y="66" width="225" height="32" class="ambs"/>
+        <rect x="625" y="66" width="113" height="32" class="ambs" opacity=".7"/>
+        <rect x="738" y="66" width="2" height="32" class="accs"/>
+        <text x="410" y="87" font-size="12" class="ink">seek 4 ms</text>
+        <text x="634" y="87" font-size="12" class="ink">rotation 2 ms</text>
+        <path d="M 739 100 L 739 116 L 672 116" class="arr"/>
+        <text x="666" y="120" font-size="11" class="acc" text-anchor="end">transfer 0.03 ms</text>
+
+        <text x="400" y="168" font-size="13" class="ink" font-weight="600">Sequential 100 MB · same drive</text>
+        <text x="400" y="184" font-size="11" class="mut">T ≈ 6 + 800 ms → 100 MB / 0.806 s ≈ 125 MB/s</text>
+        <rect x="400" y="194" width="3" height="32" class="ambs"/>
+        <rect x="403" y="194" width="337" height="32" class="accs"/>
+        <text x="420" y="215" font-size="12" class="ink">transfer 800 ms</text>
+        <path d="M 401 228 L 401 244 L 450 244" class="arr"/>
+        <text x="455" y="248" font-size="11" class="amb">seek + rotation 6 ms</text>
+
+        <text x="400" y="292" font-size="12" class="ink2">Same drive, same bytes per second when moving:</text>
+        <text x="400" y="310" font-size="12" class="ink2">125 ÷ 0.66 ≈ <tspan font-weight="600" class="ink">190×</tspan> faster when it never repositions.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 4. Left: a disk with three tracks, the rings outer 0–11, middle 12–23 and inner 24–35, each cut into 12 sectors, the numbered pieces (OSTEP Figure 37.3, redrawn), serving "read sector 11". Right: the same three costs as time bars, for one random 4 KB read and for one 100 MB sequential read. Amber is time spent positioning; teal is time spent moving bytes.</p>
+  </div>
+
+  <p>Figure 4 follows one request, "read sector 11", through OSTEP's toy disk: three tracks of twelve sectors, with the head starting over the inner track. Three things happen, in a fixed order.</p>
+  <p><b>① Seek.</b> The arm swings from the inner track to the outer one. A seek is four motions, not one: the arm accelerates, coasts at full speed, decelerates, and finally <b>settles</b>, holding until the head is locked onto the track. Settling alone takes 0.5–2 ms, because the drive must be certain it is on the right track, not merely close to it. Real drives quote average seeks of 4–9 ms. <span class="src">OSTEP 37.3</span></p>
+  <p><b>② Rotation.</b> The head is over the right track, but sector 11 is somewhere else on the ring, so the head waits for the platter to carry it round. On average that is half a rotation. At 15,000 RPM the platter turns 250 times a second, so one rotation takes 4 ms and the average wait is 2 ms. At 7,200 RPM one rotation takes 8.3 ms and the average wait is about 4.2 ms. <span class="src">OSTEP 37.3–37.4</span></p>
+  <p><b>③ Transfer.</b> Sector 11 passes under the head and its bytes are read. A 4 KB request is eight consecutive sectors, normally side by side on one track, so after one seek and one rotation all eight pass under the head in a single pass. This is the only step that moves data, and it is quick: at 125 MB/s a 4 KB read takes 4,096 ÷ 125,000,000 s ≈ 30 µs. <span class="src">OSTEP 37.4</span></p>
+  <p>The three add up to the time of one I/O, and the rate a workload sees is its size divided by that time:</p>
+  <p class="gist ks"><span class="lbl">FORMULA</span>T<sub>I/O</sub> = T<sub>seek</sub> + T<sub>rotation</sub> + T<sub>transfer</sub> &nbsp;·&nbsp; R<sub>I/O</sub> = size ÷ T<sub>I/O</sub></p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>TERM</th><th>WHAT HAPPENS</th><th>CHEETAH 15K.5 (4 KB, RANDOM)</th><th>WHY THAT NUMBER</th></tr></thead>
+      <tbody>
+        <tr><td><b>T<sub>seek</sub></b></td><td>The arm accelerates, coasts, decelerates and settles over the track.</td><td class="c">4 ms</td><td>The manufacturer's average seek.</td></tr>
+        <tr><td><b>T<sub>rotation</sub></b></td><td>The head waits for the sector to come round.</td><td class="c">2 ms</td><td>15,000 RPM = 4 ms per rotation; on average the sector is half a turn away.</td></tr>
+        <tr><td><b>T<sub>transfer</sub></b></td><td>The sector passes under the head and its bytes move.</td><td class="c">0.03 ms</td><td>4 KB ÷ 125 MB/s ≈ 30 µs.</td></tr>
+        <tr><td><b>T<sub>I/O</sub></b></td><td>The sum.</td><td class="c">≈ 6 ms</td><td>R<sub>I/O</sub> = 4 KB ÷ 6 ms ≈ 0.66 MB/s.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="figure" id="fig-rate">
+    <div class="scroll">
+      <svg viewBox="0 0 760 570" width="760" role="img" aria-label="Four panels: one track unrolled into sectors and multiplied by rotations per second to give 125 MB/s; outer and inner zones; one random 4 KB read drawn to scale with the arithmetic; and a side view of four platters where only one of eight heads reads">
+        <text x="16" y="20" font-size="13" class="ink" font-weight="600">① one rotation carries one whole track under the head</text>
+        <text x="20" y="39" font-size="11" class="amb">↓ one sector = 512 B</text>
+        <rect x="20" y="44" width="480" height="26" class="accs"/>
+        <g class="ln"><path d="M36 44 V70"/><path d="M52 44 V70"/><path d="M68 44 V70"/><path d="M84 44 V70"/><path d="M100 44 V70"/><path d="M116 44 V70"/><path d="M132 44 V70"/><path d="M148 44 V70"/><path d="M164 44 V70"/><path d="M180 44 V70"/><path d="M196 44 V70"/><path d="M212 44 V70"/><path d="M228 44 V70"/><path d="M244 44 V70"/><path d="M260 44 V70"/><path d="M276 44 V70"/><path d="M292 44 V70"/><path d="M308 44 V70"/><path d="M324 44 V70"/><path d="M340 44 V70"/><path d="M356 44 V70"/><path d="M372 44 V70"/><path d="M388 44 V70"/><path d="M404 44 V70"/><path d="M420 44 V70"/><path d="M436 44 V70"/><path d="M452 44 V70"/><path d="M468 44 V70"/><path d="M484 44 V70"/></g>
+        <rect x="20" y="44" width="16" height="26" class="ambs"/>
+        <text x="506" y="62" font-size="14" class="mut">…</text>
+        <path d="M20 76 V82 H500 V76" class="ln"/>
+        <text x="260" y="98" font-size="12" class="ink mono" text-anchor="middle">one outer track ≈ 1,000 sectors × 512 B ≈ 0.5 MB</text>
+        <text x="20" y="124" font-size="12" class="ink2 mono">× 250 rotations per second   (15,000 RPM ÷ 60)</text>
+        <text x="20" y="148" font-size="13" class="acc" font-weight="600">= 125 MB/s, the “Max Transfer” of OSTEP Figure 37.5</text>
+        <text x="20" y="170" font-size="11" class="ink2">Barracuda: 105 MB/s ÷ 120 rotations per second (7,200 RPM) ≈ 0.875 MB per track</text>
+        <text x="560" y="20" font-size="13" class="ink" font-weight="600">② zones</text>
+        <circle cx="660" cy="104" r="74" class="surf"/>
+        <circle cx="660" cy="104" r="66" style="fill:none;stroke:var(--accent);stroke-width:8;opacity:.55"/>
+        <circle cx="660" cy="104" r="34" style="fill:none;stroke:var(--amber);stroke-width:8;opacity:.55"/>
+        <g style="stroke:var(--ink-2);stroke-width:1.2"><path d="M722.0 104.0 L730.0 104.0"/><path d="M719.9 120.0 L727.6 122.1"/><path d="M713.7 135.0 L720.6 139.0"/><path d="M703.8 147.8 L709.5 153.5"/><path d="M691.0 157.7 L695.0 164.6"/><path d="M676.0 163.9 L678.1 171.6"/><path d="M660.0 166.0 L660.0 174.0"/><path d="M644.0 163.9 L641.9 171.6"/><path d="M629.0 157.7 L625.0 164.6"/><path d="M616.2 147.8 L610.5 153.5"/><path d="M606.3 135.0 L599.4 139.0"/><path d="M600.1 120.0 L592.4 122.1"/><path d="M598.0 104.0 L590.0 104.0"/><path d="M600.1 88.0 L592.4 85.9"/><path d="M606.3 73.0 L599.4 69.0"/><path d="M616.2 60.2 L610.5 54.5"/><path d="M629.0 50.3 L625.0 43.4"/><path d="M644.0 44.1 L641.9 36.4"/><path d="M660.0 42.0 L660.0 34.0"/><path d="M676.0 44.1 L678.1 36.4"/><path d="M691.0 50.3 L695.0 43.4"/><path d="M703.8 60.2 L709.5 54.5"/><path d="M713.7 73.0 L720.6 69.0"/><path d="M719.9 88.0 L727.6 85.9"/><path d="M690.0 104.0 L698.0 104.0"/><path d="M686.0 119.0 L692.9 123.0"/><path d="M675.0 130.0 L679.0 136.9"/><path d="M660.0 134.0 L660.0 142.0"/><path d="M645.0 130.0 L641.0 136.9"/><path d="M634.0 119.0 L627.1 123.0"/><path d="M630.0 104.0 L622.0 104.0"/><path d="M634.0 89.0 L627.1 85.0"/><path d="M645.0 78.0 L641.0 71.1"/><path d="M660.0 74.0 L660.0 66.0"/><path d="M675.0 78.0 L679.0 71.1"/><path d="M686.0 89.0 L692.9 85.0"/></g>
+        <circle cx="660" cy="104" r="14" class="surf"/>
+        <text x="560" y="198" font-size="11" class="acc">outer track: 24 sectors a turn</text>
+        <text x="560" y="214" font-size="11" class="amb">inner track: 12 sectors a turn</text>
+        <text x="560" y="230" font-size="11" class="ink2">same RPM, so 125 MB/s is the</text>
+        <text x="560" y="246" font-size="11" class="ink2">outer-zone rate; inner ≈ half</text>
+        <text x="16" y="276" font-size="13" class="ink" font-weight="600">③ one random 4 KB read on the Cheetah, drawn to scale</text>
+        <rect x="20" y="288" width="400" height="28" class="ambs"/>
+        <rect x="420" y="288" width="200" height="28" class="ambs" style="opacity:.75"/>
+        <rect x="620" y="288" width="3" height="28" class="accs"/>
+        <text x="220" y="307" font-size="12" class="ink" text-anchor="middle">seek 4 ms</text>
+        <text x="520" y="307" font-size="12" class="ink" text-anchor="middle">rotation 2 ms</text>
+        <text x="630" y="307" font-size="11" class="acc">← transfer 0.03 ms</text>
+        <text x="20" y="340" font-size="12" class="ink2 mono" style="white-space:pre">seek      4 ms: the spec’s average seek (OSTEP Figure 37.5)</text>
+        <text x="20" y="358" font-size="12" class="ink2 mono" style="white-space:pre">rotation  60 s ÷ 15,000 = 4 ms a turn; on average wait half a turn = 2 ms</text>
+        <text x="20" y="376" font-size="12" class="ink2 mono" style="white-space:pre">transfer  4 KB ÷ 125 MB/s = 4 KB ÷ 125 KB/ms = 0.032 ms     (MB/s = KB/ms)</text>
+        <text x="20" y="394" font-size="12" class="ink mono" style="white-space:pre">total     4 + 2 + 0.03 ≈ 6 ms  →  R = 4 KB ÷ 6 ms ≈ 0.66 KB/ms = 0.66 MB/s</text>
+        <text x="20" y="412" font-size="12" class="ink mono" style="white-space:pre">100 MB    6 ms + 100 MB ÷ 125 MB/s = 6 + 800 ms  →  R = 100 MB ÷ 0.806 s ≈ 124 MB/s</text>
+        <text x="16" y="452" font-size="13" class="ink" font-weight="600">④ 125 MB/s is one head’s rate</text>
+        <rect x="20" y="470" width="200" height="8" class="surf"/>
+        <rect x="20" y="494" width="200" height="8" class="surf"/>
+        <rect x="20" y="518" width="200" height="8" class="surf"/>
+        <rect x="20" y="542" width="200" height="8" class="surf"/>
+        <rect x="186" y="463" width="12" height="5" class="surf"/>
+        <path d="M198 465.5 L250 465.5" class="ln"/>
+        <rect x="186" y="480" width="12" height="5" class="surf"/>
+        <path d="M198 482.5 L250 482.5" class="ln"/>
+        <rect x="186" y="487" width="12" height="5" class="accs"/>
+        <path d="M198 489.5 L250 489.5" class="ln"/>
+        <rect x="186" y="504" width="12" height="5" class="surf"/>
+        <path d="M198 506.5 L250 506.5" class="ln"/>
+        <rect x="186" y="511" width="12" height="5" class="surf"/>
+        <path d="M198 513.5 L250 513.5" class="ln"/>
+        <rect x="186" y="528" width="12" height="5" class="surf"/>
+        <path d="M198 530.5 L250 530.5" class="ln"/>
+        <rect x="186" y="535" width="12" height="5" class="surf"/>
+        <path d="M198 537.5 L250 537.5" class="ln"/>
+        <rect x="186" y="552" width="12" height="5" class="surf"/>
+        <path d="M198 554.5 L250 554.5" class="ln"/>
+        <rect x="250" y="460" width="12" height="96" class="ambs"/>
+        <text x="290" y="474" font-size="11" class="ink">4 platters = 8 surfaces = 8 heads, all on one arm.</text>
+        <text x="290" y="492" font-size="11" class="ink2">The drive reads through one head at a time (teal),</text>
+        <text x="290" y="510" font-size="11" class="ink2">so more surfaces add capacity, not speed.</text>
+        <text x="290" y="528" font-size="11" class="ink2">Per surface: Cheetah 300 GB ÷ 8 = 37.5 GB; Barracuda 1 TB ÷ 8 = 125 GB.</text>
+        <text x="290" y="546" font-size="11" class="mut">Exception: dual-actuator drives run two head groups at once.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 5. Where Figure 4’s numbers come from. ① The rate is one track’s bytes times rotations per second. ② Outer tracks hold more sectors, so 125 MB/s is the top speed. ③ The random read to scale: seek and rotation fill the bar, transfer is a 3-pixel sliver. ④ The rate belongs to one head, whatever the number of surfaces.</p>
+  </div>
+
+  <p>The 125 MB/s in the table is not a separate measurement; it follows from the geometry (Figure 5). ① While the head sits over one track, one rotation carries every sector of that track under it once, so the peak rate is the bytes on one track times the rotations per second. The Cheetah turns 15,000 times a minute, 250 times a second, and 125 MB/s ÷ 250 = 0.5 MB: about 1,000 sectors of 512 bytes on an outer track. The Barracuda turns 120 times a second at 105 MB/s, so its tracks hold about 0.875 MB. ② Tracks near the edge are longer than tracks near the spindle, so drives give them more sectors; a band of neighbouring tracks with the same sector count is a <b>zone</b>. Every track turns at the same RPM, so an outer track delivers more bytes per second, and the spec's 125 MB/s is the outer-zone speed. Inner zones deliver roughly half on typical drives. <span class="src">OSTEP 37.3 (multi-zoned drives), Figure 37.5</span></p>
+  <p>So a random 4 KB read costs about 6 ms, of which almost 6 ms is waiting and 0.03 ms is work: for more than 99% of the request, nothing is being read. The rate comes out at 4 KB ÷ 6 ms ≈ 0.66 MB/s, on a drive whose head can move 125 MB/s. ③ Figure 5 draws this read to scale. The arithmetic stays short with one unit trick: KB per ms equals MB per s, because the top and the bottom are both scaled by a thousand. So 4 KB ÷ 6 ms = 0.66 KB/ms = 0.66 MB/s, and the transfer is 4 KB ÷ 125 KB/ms = 0.032 ms.</p>
+  <p>Now read 100 MB that lies in one contiguous run (Figure 4, lower bars; Figure 5, ③, last line). The drive pays one seek and one rotation, about 6 ms, and then streams for 100 MB ÷ 125 MB/s = 800 ms. The rate is 100 MB ÷ 0.806 s ≈ 124 MB/s, almost the peak. Same drive, same speed while the bytes flow, and yet the sequential read runs about 125 ÷ 0.66 ≈ 190 times faster than the random one. The Barracuda, a cheaper 7,200 RPM drive with a 9 ms average seek, does worse: about 13.2 ms per random 4 KB read (0.31 MB/s) against 105 MB/s sequential, a gap of about 340×. <span class="src">OSTEP 37.4, Figures 37.5–37.6</span></p>
+  <p>④ All of these rates belong to one head. The Cheetah and the Barracuda each have 4 platters, so 8 surfaces and 8 heads, but the heads hang on one arm, and the drive reads through one of them at a time: the tracks of different surfaces never line up closely enough for every head to sit on its own track at once. More platters therefore add capacity, not speed. Per surface, the Cheetah holds 300 GB ÷ 8 = 37.5 GB and the Barracuda 1 TB ÷ 8 = 125 GB; drives of the 2020s hold about 2–3 TB per platter. The exception is the dual-actuator drive (for example Seagate's MACH.2), which gives two groups of heads their own arms and so reads through two at once. <span class="src">OSTEP Figure 37.5</span></p>
+  <p>The gap also widens over the years. Packing bits more densely raises the transfer rate, since more bits pass under the head per rotation, but seek and rotation improve slowly, because small and cheap motors are hard to make faster. The log-structured file system of page ④ was designed in the early 1990s around exactly this trend. <span class="src">OSTEP 43, introduction</span></p>
+  <p class="gist ks"><span class="lbl">CARRY</span>T<sub>I/O</sub> = T<sub>seek</sub> + T<sub>rotation</sub> + T<sub>transfer</sub>. For a small random request the first two are over 99% of the time, so the same disk runs 190–340× faster on one long contiguous run. OSTEP's rule: use disks sequentially; when that is impossible, transfer in large chunks. The peak rate is one track per rotation, through one head.</p>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="n">§3</span><h2>What does the OS see, and what is it promised?</h2><span class="tag t-ks">★ core · read every line</span></div>
+
+  <div class="figure" id="fig-array">
+    <div class="scroll">
+      <svg viewBox="0 0 760 300" width="760" role="img" aria-label="Left: the sector array the OS sees, numbered 0 to n minus 1. Right: a platter on which sector 5 sits at one fixed spot; writing sector 5 again goes to the same spot">
+        <defs>
+          <marker id="h1c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="vio"/></marker>
+        </defs>
+        <text x="16" y="40" font-size="13" class="ink" font-weight="600">What the OS sees: one flat array of sectors</text>
+        <text x="16" y="58" font-size="11" class="mut">the number is the logical block address (LBA)</text>
+        <g class="surf">
+          <rect x="16" y="70" width="30" height="34"/><rect x="48" y="70" width="30" height="34"/><rect x="80" y="70" width="30" height="34"/><rect x="112" y="70" width="30" height="34"/><rect x="144" y="70" width="30" height="34"/>
+          <rect x="208" y="70" width="30" height="34"/><rect x="240" y="70" width="30" height="34"/><rect x="272" y="70" width="30" height="34"/><rect x="304" y="70" width="30" height="34"/><rect x="336" y="70" width="30" height="34"/>
+          <rect x="406" y="70" width="40" height="34"/>
+        </g>
+        <rect x="176" y="70" width="30" height="34" class="vios"/>
+        <g font-size="12" class="mono ink2" text-anchor="middle">
+          <text x="31" y="92">0</text><text x="63" y="92">1</text><text x="95" y="92">2</text><text x="127" y="92">3</text><text x="159" y="92">4</text>
+          <text x="223" y="92">6</text><text x="255" y="92">7</text><text x="287" y="92">8</text><text x="319" y="92">9</text><text x="351" y="92">10</text>
+          <text x="386" y="92">…</text><text x="426" y="92">n−1</text>
+        </g>
+        <text x="191" y="92" font-size="12" class="mono vio" text-anchor="middle" font-weight="600">5</text>
+
+                <circle cx="590" cy="128" r="110" class="surf"/>
+        <circle cx="590" cy="128" r="82" class="ln"/>
+        <circle cx="590" cy="128" r="56" class="ln"/>
+        <circle cx="590" cy="128" r="30" class="surf"/>
+        <g class="ln">
+          <path d="M590 46 L590 18"/><path d="M631 57 L645 32.7"/><path d="M661 87 L685.3 73"/><path d="M672 128 L700 128"/>
+          <path d="M661 169 L685.3 183"/><path d="M631 199 L645 223.3"/><path d="M590 210 L590 238"/><path d="M549 199 L535 223.3"/>
+          <path d="M519 169 L494.7 183"/><path d="M508 128 L480 128"/><path d="M519 87 L494.7 73"/><path d="M549 57 L535 32.7"/>
+        </g>
+        <path d="M 645 223.3 A 110 110 0 0 1 590 238 L 590 210 A 82 82 0 0 0 631 199 Z" class="vios"/>
+        <text x="614" y="225" font-size="11" class="mono vio" text-anchor="middle" font-weight="600">5</text>
+        <text x="590" y="132" font-size="10" class="mut" text-anchor="middle">spindle</text>
+
+        <path d="M 191 106 C 196 210, 470 260, 600 226" class="arr" style="stroke:var(--violet)" marker-end="url(#h1c)"/>
+        <text x="262" y="148" font-size="12" class="vio" font-weight="600">fixed at manufacture:</text>
+        <text x="262" y="164" font-size="12" class="vio">sector 5 = one surface, track, angle</text>
+
+        <text x="16" y="268" font-size="12" class="ink">write(5): the arm seeks to that track, waits for that spot, and magnetizes it again.</text>
+        <text x="16" y="288" font-size="12" class="ink">write(5) again: the same spot. No erase step, no wear to manage, no table of where things went.</text>
+      </svg>
+    </div>
+    <p class="cap">Figure 6. The interface and the place. Left: the OS sees n sectors numbered 0 to n−1. Right: on a hard disk each number is one fixed spot, so a rewrite goes back to the same spot. Page ② draws the SSD version of this figure, where the array stays and the fixed spot goes.</p>
+  </div>
+
+  <p>The OS never sees platters or tracks. The drive presents itself as an array of n sectors numbered 0 to n−1 (Figure 6, left), and this number is called the <b>logical block address</b> (LBA). The OS issues requests such as "read sector 7" or "write 8 sectors starting at 1,000", and the drive turns each number into a surface, a track and an angle. <span class="src">OSTEP 37.1</span></p>
+  <p>The interface makes one hard promise: a write of a single 512-byte sector is <b>atomic</b>, meaning it lands completely or not at all. File systems usually write 4 KB at a time, which is eight sectors, and for those there is no promise. If power fails partway, only some of the eight may land; this is a <b>torn write</b>. The crash-recovery machinery of file systems, including the checkpoint protocol of LFS on page ④, exists because of this gap. <span class="src">OSTEP 37.1</span></p>
+  <p>Clients also rely on two promises the interface never states, which Schlosser and Ganger called the drive's <b>unwritten contract</b>: two blocks with nearby numbers are faster to access together than two far apart, and a contiguous run is the fastest access of all. §2 is why both hold. File systems are built on this contract; page ③ shows that the SSD has a contract of its own, with different terms. <span class="src">OSTEP 37.1</span></p>
+  <p>On a hard disk the mapping from number to place is <b>static</b>: sector 5 lies on one surface, one track, at one angle, from the day the drive is made (Figure 6, right). Writing sector 5 means waiting for that spot and magnetizing it again. There is no separate erase step, rewriting does not wear the spot out in any way the OS must manage, and the drive keeps no table of where data went, because nothing ever goes anywhere. OSTEP uses exactly this point when it introduces the SSD's trim command: <q>For a standard hard drive, trim isn't particularly useful, because the drive has a static mapping of block addresses to specific platter, track, and sector(s).</q> <span class="src">OSTEP 44.8, aside on trim</span></p>
+  <p>This property, overwrite in place with address equal to place, is the one flash cannot keep. A flash chip cannot overwrite a page, so the SSD keeps the array of Figure 6 but gives up the fixed spot, and nearly everything in chapter 44 follows from that single change.</p>
+  <p class="gist ks"><span class="lbl">CARRY</span>The OS sees an array of numbered sectors. Only a single-sector write is atomic. On a hard disk each number is a fixed spot, so a rewrite simply overwrites that spot: no erase, no wear, no map.</p>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="n">§4</span><h2>Which seven questions compare a hard disk with an SSD?</h2><span class="tag t-ctl">skim · table + carry</span></div>
+  <div class="tablewrap" id="axes">
+    <table>
+      <thead><tr><th>AXIS</th><th>THE QUESTION IT ASKS</th><th>HARD DISK</th><th>SSD ANSWER</th></tr></thead>
+      <tbody>
+        <tr><td><b>A1 · What holds a bit</b></td><td>What physical thing stores the data?</td><td>A magnetized spot on a spinning platter; parts move.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s2">② §2</a></td></tr>
+        <tr class="win-a"><td><b>A2 · Operations and units</b></td><td>Which commands exist, and on what size?</td><td>Read a sector, write a sector. One unit (512 B); a write overwrites in place.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s3">② §3</a></td></tr>
+        <tr><td><b>A3 · Where the time goes</b></td><td>What dominates one request's latency?</td><td>Positioning: seek + rotation, several ms. Transfer of 4 KB ≈ 0.03 ms.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s4">② §4</a></td></tr>
+        <tr class="win-a"><td><b>A4 · Address → place</b></td><td>Does sector n always live in the same physical spot?</td><td>Yes, fixed at manufacture.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s7">② §7</a></td></tr>
+        <tr><td><b>A5 · Access pattern</b></td><td>How much does random cost against sequential?</td><td>Random 4 KB: 0.3–0.7 MB/s. Sequential: 105–125 MB/s. Gap 190–340×.</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s9">③ §9</a></td></tr>
+        <tr><td><b>A6 · Wear and failure</b></td><td>What breaks it?</td><td>Mechanics, such as a head crash, where the head touches the surface. Rewrites do not wear sectors out.</td><td class="c"><a href="2026-10-08-storage-2-flash-and-ftl.html#s4">② §4</a></td></tr>
+        <tr><td><b>A7 · Price per GB</b></td><td>What does capacity cost?</td><td>About 5 cents per GB (OSTEP's 2015 prices).</td><td class="c"><a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s9">③ §9</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Two rows, shaded, carry chapter 44. A2 (one unit, overwrite in place) is what flash breaks, and A4 (address equals place) is what the SSD gives up in order to cope. The finished table, with both columns, is on <a href="2026-10-08-storage-3-garbage-and-write-amplification.html#s9">③ §9</a>. <span class="src">OSTEP 44.11 for A5 and A7</span></p>
+  <p class="gist"><span class="lbl">CARRY</span>Seven axes compare the devices; A2 (the write unit) and A4 (address = place) are the two that change everything.</p>
+</section>
+
+<section id="recap">
+  <div class="sec-head"><h2>What this page settled</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>IMPORTANCE</th><th>CLAIM</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td class="c">main</td><td>A hard disk is a spinning platter and a swinging arm; a request waits for both.</td><td class="c"><a href="#s1">§1</a></td></tr>
+        <tr><td class="c">★ core</td><td>T<sub>I/O</sub> = T<sub>seek</sub> + T<sub>rotation</sub> + T<sub>transfer</sub>; a random 4 KB read is over 99% positioning, so sequential runs 190–340× faster.</td><td class="c"><a href="#s2">§2</a></td></tr>
+        <tr><td class="c">★ core</td><td>The OS sees an array of sectors; only one-sector writes are atomic; on a hard disk each number is a fixed spot, overwritten in place.</td><td class="c"><a href="#s3">§3</a></td></tr>
+        <tr><td class="c">skim</td><td>Seven axes compare the devices; A2 and A4 carry chapter 44.</td><td class="c"><a href="#s4">§4</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="series">
+  <div class="sec-head"><h2>The pages</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>PAGE</th><th>IMPORTANCE</th><th>QUESTION IT ANSWERS</th><th>STANDS IN FOR</th></tr></thead>
+      <tbody>
+        <tr><td><b>① The hard disk</b> (here)</td><td class="c">main</td><td>Why is random access slow, and what is the OS promised?</td><td>OSTEP 37.1–37.4</td></tr>
+        <tr><td><a href="2026-10-08-storage-2-flash-and-ftl.html"><b>② Flash and the FTL</b></a></td><td class="c">★ core</td><td>What can a flash chip not do, and how does the SSD still look like a disk?</td><td>OSTEP 44.1–44.7</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-garbage-and-write-amplification.html"><b>③ Garbage and write amplification</b></a></td><td class="c">★ core</td><td>What does never overwriting cost, and how is the cost kept down?</td><td>OSTEP 44.8–44.12</td></tr>
+        <tr><td><a href="2026-10-08-storage-3-5-flash-caches.html"><b>3.5 Flash caches</b></a></td><td class="c">★ core</td><td>How does a cache find a tiny object on flash, and why does that cost DRAM?</td><td>the papers' background sections</td></tr>
+        <tr><td><a href="2026-10-08-storage-4-log-structured-file-system.html"><b>④ The log-structured file system</b></a></td><td class="c">main</td><td>How does a file system write only sequentially, and still find its data?</td><td>OSTEP 43</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="legend">
+  <div class="sec-head"><h2>Terms and figure marks</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>TERM OR MARK</th><th>MEANING</th><th>WHERE</th></tr></thead>
+      <tbody>
+        <tr><td><b>Platter · spindle</b></td><td>The magnetic disc; the motor hub that spins all platters at one constant rate (7,200–15,000 RPM).</td><td class="c"><a href="#fig-photo">F1</a></td></tr>
+        <tr><td><b>Head · arm · actuator</b></td><td>The read/write element (one per surface); the arm that carries the heads; the voice-coil motor that swings it.</td><td class="c"><a href="#fig-photo">F1</a> <a href="#fig-closeup">F3</a></td></tr>
+        <tr><td><b>Surface</b></td><td>One side of a platter; each platter has two, and each surface has its own head.</td><td class="c"><a href="#fig-tracks">F2</a></td></tr>
+        <tr><td><b>Track · sector</b></td><td>One concentric ring of data; a 512-byte slice of a track, the drive's unit of reading and writing (4,096 bytes physically on drives since about 2011). A 4 KB request = 8 sectors.</td><td class="c"><a href="#fig-tracks">F2</a> <a href="#fig-track">F4</a></td></tr>
+        <tr><td><b>Seek · rotation · transfer</b></td><td>Moving the arm to the track; waiting for the sector to come round; moving the bytes.</td><td class="c"><a href="#fig-track">F4</a></td></tr>
+        <tr><td><b>Zone</b></td><td>A band of neighbouring tracks with the same number of sectors; outer zones hold more sectors, so they read faster.</td><td class="c"><a href="#fig-rate">F5</a></td></tr>
+        <tr><td><b>Amber · teal bars</b></td><td>Amber = time spent positioning; teal = time spent moving bytes.</td><td class="c"><a href="#fig-track">F4</a> <a href="#fig-rate">F5</a></td></tr>
+        <tr><td><b>LBA</b></td><td>Logical block address: the sector number the OS uses.</td><td class="c"><a href="#fig-array">F6</a></td></tr>
+        <tr><td><b>Violet</b></td><td>The sector being followed through the figure.</td><td class="c"><a href="#fig-track">F4</a> <a href="#fig-array">F6</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="edges">
+  <div class="sec-head"><h2>Leaves out · assumes</h2></div>
+  <p><b>Leaves out.</b> Track skew, zone layouts beyond Figure 5’s sketch, and the drive's cache with write-back versus write-through (OSTEP 37.3). Disk scheduling: SSTF, SCAN, C-SCAN and SPTF (OSTEP 37.5). The derivation that an average seek is a third of a full seek (OSTEP 37.4 aside). Chapters 44 and 43 use none of these.</p>
+  <p><b>Assumes.</b> A feel for the size of a millisecond against a microsecond.</p>
+  <p><b>Next.</b> <a href="2026-10-08-storage-2-flash-and-ftl.html"><b>② Flash and the FTL</b></a>: what a flash chip cannot do, and how the SSD keeps showing the OS this same sector array anyway.</p>
+</section>
+
+</div>
