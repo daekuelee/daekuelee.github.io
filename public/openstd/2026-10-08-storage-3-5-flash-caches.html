@@ -20,7 +20,7 @@
   <div class="eyebrow">Short lecture · 2026-10-10 · page 3.5, between ③ and ④ · importance: ★ core for the papers · stands in for the background sections of the OpenStd papers</div>
   <h1>3.5 Flash caches: how a cache finds a 100-byte object, and why that costs DRAM</h1>
   <p class="subtitle">Page ③ closed the SSD's own books: its FTL map and its garbage collection live inside the drive and cost little. This page opens a second problem, one layer up. Large services cache billions of objects of about 100 bytes, DRAM is too expensive to hold them, so the cache moves onto SSDs. An SSD takes only page numbers, so the cache needs a second map, from keys to pages, in the server's DRAM, and with objects 40 times smaller than a page that map costs more DRAM than the flash it points into. §0 states that problem against page ③; §1–§5 show how a cache finds an object; §6–§9 take the cost by why, what, how and when.</p>
-  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read. The dotted tag is his outline: 문제 · 왜 first (§0), then 문맥 (context), then 어떤걸 · how · when. Every section is needed for the papers. Colors: violet = what lives in the server's DRAM (the cache's map, filters) · amber = objects on flash · teal = the SSD's own layer, or a cost kept low · red = a cost.</p>
+  <p class="src" style="white-space:normal">Section tags: ★ core = read every line · main = read. The dotted tag is the author's outline: 문제 · 왜 first (§0), then 문맥 (context), then 어떤걸 · how · when. Every section is needed for the papers. Colors: violet = what lives in the server's DRAM (the cache's map, filters) · amber = objects on flash · teal = the SSD's own layer, or a cost kept low · red = a cost.</p>
 </header>
 
 <section id="overview">
@@ -1137,7 +1137,7 @@
         <text x="352" y="340" font-size="11.5" class="ink">≈ 3 bits</text>
         <text x="448" y="340" font-size="11.5" class="ink">≈ 0.4%</text>
         <text x="556" y="340" font-size="12" class="ink" font-weight="600">≈ 4%</text>
-        <text x="16" y="364" font-size="10" class="mut">right column = the formula above, on each paper’s bits per object (my arithmetic)</text>
+        <text x="16" y="364" font-size="10" class="mut">right column = the formula above, on each paper’s bits per object (arithmetic on the papers' numbers)</text>
         <text x="16" y="380" font-size="9.5" class="mono mut">Nemo §2.3 (log index) · Kangaroo §2.3 (Flashield, sets) · Kangaroo Table 1 (Kangaroo)</text>
         <rect x="16" y="392" width="728" height="30" rx="6" class="stps"/>
         <text x="28" y="412" font-size="12" class="stp" font-weight="600">A full entry per tiny object makes the map’s DRAM cost more than the flash holding the data.</text>
@@ -1349,7 +1349,7 @@
         <text x="16" y="604" font-size="9.5" class="mono mut">Nemo §1: set fill “≈7.0%” for FairyWREN, raised “to over 89%” (89.34%, §4.2)</text>
       </svg>
     </div>
-    <p class="cap">Figure 10. Three whens. ① The formula of Figure 8, plotted against object size: a full map per object costs more than the flash below about 150 B and a few percent above 2 KB, which is where CacheLib switches from sets to a log. ② Dense flash wears out sooner, so the write budget, not DRAM, becomes the limit. ③ The papers' common answer to ②: write a set only when much of it is new. Panel ① and the shares in ③ are my arithmetic on the papers' numbers; the rest is quoted.</p>
+    <p class="cap">Figure 10. Three whens. ① The formula of Figure 8, plotted against object size: a full map per object costs more than the flash below about 150 B and a few percent above 2 KB, which is where CacheLib switches from sets to a log. ② Dense flash wears out sooner, so the write budget, not DRAM, becomes the limit. ③ The papers' common answer to ②: write a set only when much of it is new. Panel ① and the shares in ③ are arithmetic on the papers' numbers; the rest is quoted.</p>
   </div>
   <p>§7's formula depends on the object size, so Figure 10 ① plots it. A map with 15 bytes per object costs as much DRAM as the flash it maps at objects of about 150 bytes, about 7% at 2 KB, and under 1% only above about 15 KB. Filters at 3 bits per object stay under 4% even at 100 bytes. CacheLib draws its line at 2 KB for this reason. Above it, "the number of unique objects in a LOC will only number in the millions. It is therefore feasible to keep an in-memory index". Below it, "billions of small objects can fit on a single 1TB flash device", and "an exact lookup index … would use an unreasonably large amount of DRAM". So its large-object cache (LOC) keeps a full map, and its small-object cache (SOC) is sets with filters. <span class="src">CacheLib §4.2 · arithmetic on Nemo §2.3</span></p>
   <p>Writes become the limit when the flash is dense and must last (②). Packing more bits into each cell puts more data on the same silicon, with less carbon per bit, but each cell survives fewer erases. FairyWREN computes that a 2 TB QLC drive kept for six years allows the application only 14 MB/s, 0.09% of the drive's write bandwidth, and that for ten years QLC allows fewer than 0.37 drive writes per day, while Kangaroo, in FairyWREN's evaluation, performs 1.46: about four times the budget. On such flash, writes decide, not DRAM. <span class="src">FairyWREN §1 and §3.3, Fig. 4</span></p>
@@ -1379,28 +1379,28 @@
 </section>
 
 <section id="said">
-  <div class="sec-head"><h2>What you said</h2></div>
+  <div class="sec-head"><h2>제 질문</h2></div>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>YOUR WORDS</th><th>ANSWERED IN</th></tr></thead>
+      <thead><tr><th>제 질문 (오타만 고쳤습니다)</th><th>AI 가 답한 절</th></tr></thead>
       <tbody>
-        <tr><td>"100B objects 가 갑자기 어이가 없고"</td><td class="c"><a href="#s1">§1</a>, Fig. 2</td></tr>
-        <tr><td>"어차피 ssd는 4kb page당하는거 아니야? 뭘 더 빠르게 할려고 다르게 하는게 있는거야 ?"</td><td class="c"><a href="#s1">§1</a>, Fig. 1</td></tr>
-        <tr><td>"set associative랑 kangaroo 가 뭔 문맥이고"</td><td class="c"><a href="#s3">§3</a>, <a href="#s5">§5</a></td></tr>
-        <tr><td>"앞단에 저거 불룸필터랑, kangaroo 랑 log-structrred cache 에 대한 brief 설명이 있꼬"</td><td class="c"><a href="#s4">§4</a>, <a href="#s5">§5</a>, <a href="#s2">§2</a></td></tr>
-        <tr><td>"set assoicative랑 log-structured 도 간략하겐 설명해야될듯"</td><td class="c"><a href="#s3">§3</a>, <a href="#s2">§2</a></td></tr>
-        <tr><td>"용어 설명이 아니라, 간단한 개념 ? 간단하겐 못설명하나 ? 60-70점스케일로" · "그 log랑 setassoative 에관해서 말하는거야"</td><td class="c"><a href="#s2">§2</a>, <a href="#s3">§3</a>: "The idea", Figs. 3–4</td></tr>
-        <tr><td>"dram 이 왜 cost가 될 수 있는지도 포인트면 역어서 해야될거 같아 인지가 안됨"</td><td class="c"><a href="#s0">§0</a> ②, <a href="#s6">§6</a></td></tr>
-        <tr><td>"이 사진은 뭘 설명할려는거? 여기 부분 갑자기 등장해서 뭔가 뭐 설명할려는지 모르겠녜"</td><td class="c"><a href="#s7">§7</a>, Fig. 8</td></tr>
-        <tr><td>"문제 제시하고 열로 왓어야 되는거 아닌가?"</td><td class="c"><a href="#s0">§0</a>, <a href="#s6">§6</a>–<a href="#s9">§9</a></td></tr>
-        <tr><td>"10절 이랑 문제 왜 어떤걸 how when 이런거 다풀어서"</td><td class="c"><a href="#s0">§0</a> 왜 · <a href="#s7">§7</a> 어떤걸 · <a href="#s8">§8</a> how · <a href="#s9">§9</a> when</td></tr>
-        <tr><td>"이게 뭘 설명할려는거지? hard disk rebuilt 3.5장인데?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
-        <tr><td>"3장에서 FTL 이 가비지 콜렉션이랑, dram map 이 필요하다 , 그런거랑, index cost 나 그런걸 이야기를 다하고 왓짢아? 그런데 3.5 장은 어떤 문제를 다시 시작하는거냐고" · "뭘 풀려한거고, 그래서 paper 로 왜 연결되는거냐"</td><td class="c"><a href="#s0">§0</a>, Figs. 0a–0b</td></tr>
-        <tr><td>"여기서 dram cache는 ssd's FtL map 이 아닌거잖아 컨트롤러가, 그리고 그 문맥을 앞단에 넣어야되는거 아니야? , 그걸로 문제로 시작해야도니ㅡㄴ거 아닌가?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
-        <tr><td>"근데 그림에서 dram 은 page를 알순 없지 않나? 로지컬 addr 정도 알 수 있는거 아닌가? FTL 만 변환 알 수 잇는거 아닌가? 그걸 연결하는 작업 까지 코딩으로 하는거야 ?"</td><td class="c">Fig. 1, <a href="#s0">§0</a> (two owners)</td></tr>
-        <tr><td>"그럼 알수가 없는데 매핑을 어케해 ?" · "이 그림은 모르는거 ?" · "여기서 logical 은 LBA 말하는건가" · "LBA 도 헷갈리는데 , 그리고 , Lba 살짝 리뷰하는 그런 정의나 그런거 까지 살짝 문맥넣어서 그림에"</td><td class="c">Fig. 1 (write arrow, the SSD's promise, the LBA panel), <a href="#s0">§0</a></td></tr>
-        <tr><td>"FTL의 garbage collection 이랑 map 을 방금 배우고 왓는데, 또 다른거 이야기하니까 , 저문맥을하는건지, 그 혼동도 풀고, 문제자체에 도 문맥을담아서"</td><td class="c"><a href="#s0">§0</a>, Fig. 0b</td></tr>
-        <tr><td>"큰 database에서는 100byte object의 수 milion cache 가 필요하고, dram 감당안되서 ssd 여야되는데, 그거에 대한 map 파일을 하는것만으로도 data의 15%가량을 dram 에 해야되서 코스트를 너무 많이 잡아먹는다는게 핵심인거지 ?"</td><td class="c">Fig. 0a, <a href="#s0">§0</a> CARRY, <a href="#s7">§7</a></td></tr>
+        <tr><td>"100B objects 가 갑자기 나와서 어리둥절하고"</td><td class="c"><a href="#s1">§1</a>, Fig. 2</td></tr>
+        <tr><td>"어차피 SSD 는 4 KB page 단위로 하는 거 아니야? 뭘 더 빠르게 하려고 다르게 하는 게 있는 거야?"</td><td class="c"><a href="#s1">§1</a>, Fig. 1</td></tr>
+        <tr><td>"set-associative 와 Kangaroo 는 무슨 맥락이고"</td><td class="c"><a href="#s3">§3</a>, <a href="#s5">§5</a></td></tr>
+        <tr><td>"앞단에 Bloom filter, Kangaroo, log-structured cache 에 대한 짧은 설명이 있고"</td><td class="c"><a href="#s4">§4</a>, <a href="#s5">§5</a>, <a href="#s2">§2</a></td></tr>
+        <tr><td>"set-associative 와 log-structured 도 간략하게는 설명해야 될 듯"</td><td class="c"><a href="#s3">§3</a>, <a href="#s2">§2</a></td></tr>
+        <tr><td>"용어 설명이 아니라 간단한 개념으로, 60–70점 수준으로 간단하게는 설명 못 하나?" · "그 log 와 set-associative 에 관해서 말하는 거야"</td><td class="c"><a href="#s2">§2</a>, <a href="#s3">§3</a>: "The idea", Figs. 3–4</td></tr>
+        <tr><td>"DRAM 이 왜 cost 가 될 수 있는지도 포인트라면 엮어서 해야 될 것 같아. 감이 안 와"</td><td class="c"><a href="#s0">§0</a> ②, <a href="#s6">§6</a></td></tr>
+        <tr><td>"이 사진은 무엇을 설명하려는 거야? 이 부분이 갑자기 등장해서 무엇을 설명하려는지 모르겠어"</td><td class="c"><a href="#s7">§7</a>, Fig. 8</td></tr>
+        <tr><td>"문제를 먼저 제시하고 10절로 왔어야 되는 거 아닌가?"</td><td class="c"><a href="#s0">§0</a>, <a href="#s6">§6</a>–<a href="#s9">§9</a></td></tr>
+        <tr><td>"10절과 문제를 왜, 어떤 것, how, when 으로 다 풀어서"</td><td class="c"><a href="#s0">§0</a> 왜 · <a href="#s7">§7</a> 어떤걸 · <a href="#s8">§8</a> how · <a href="#s9">§9</a> when</td></tr>
+        <tr><td>"이게 무엇을 설명하려는 거지? hard disk rebuilt 의 3.5장인데?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
+        <tr><td>"3장에서 FTL 의 garbage collection 과 DRAM map 이 필요하다는 것, index cost 같은 이야기를 다 하고 왔잖아? 그런데 3.5장은 어떤 문제를 다시 시작하는 거냐고" · "무엇을 풀려고 한 거고, 그래서 paper 로 왜 연결되는 거냐"</td><td class="c"><a href="#s0">§0</a>, Figs. 0a–0b</td></tr>
+        <tr><td>"여기서 DRAM cache 는 SSD 컨트롤러의 FTL map 이 아닌 거잖아? 그 맥락을 앞단에 넣어야 되는 거 아니야? 그걸 문제로 시작해야 되는 거 아닌가?"</td><td class="c">Fig. 1, <a href="#s0">§0</a></td></tr>
+        <tr><td>"그런데 그림에서 DRAM 은 page 를 알 수 없지 않나? logical address 정도만 알 수 있는 거 아닌가? 변환은 FTL 만 알 수 있는 거 아닌가? 그걸 연결하는 작업까지 코딩으로 하는 거야?"</td><td class="c">Fig. 1, <a href="#s0">§0</a> (two owners)</td></tr>
+        <tr><td>"그럼 알 수가 없는데 매핑을 어떻게 해?" · "이 그림은 모르는 거야?" · "여기서 logical 은 LBA 를 말하는 건가" · "LBA 도 헷갈리는데, LBA 를 살짝 다시 보는 정의까지 맥락으로 그림에 넣어서"</td><td class="c">Fig. 1 (write arrow, the SSD's promise, the LBA panel), <a href="#s0">§0</a></td></tr>
+        <tr><td>"FTL 의 garbage collection 과 map 을 방금 배우고 왔는데, 또 다른 이야기를 하니까 그 맥락을 하는 건지 헷갈려. 그 혼동도 풀고, 문제 자체에도 맥락을 담아서"</td><td class="c"><a href="#s0">§0</a>, Fig. 0b</td></tr>
+        <tr><td>"큰 database 에서는 100 byte object 수백만 개의 cache 가 필요하고, DRAM 으로 감당이 안 돼서 SSD 여야 하는데, 그 map 만으로도 data 의 15% 가량을 DRAM 에 둬야 해서 cost 를 너무 많이 잡아먹는다는 게 핵심인 거지?"</td><td class="c">Fig. 0a, <a href="#s0">§0</a> CARRY, <a href="#s7">§7</a></td></tr>
       </tbody>
     </table>
   </div>
